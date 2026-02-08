@@ -8,7 +8,7 @@ struct Cli {
     db: Option<String>,
 
     /// Increase logging verbosity
-    #[arg(short, long, action = clap::ArgAction::Count)]
+    #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
 
     /// Page size for Asana API requests (default: API default of 100)
@@ -27,28 +27,28 @@ impl asanadw::SyncProgress for StderrProgress {
         eprintln!("[{}/{}] Syncing {}...", index + 1, total, entity_key);
     }
 
-    fn on_tasks_fetched(&self, _entity_key: &str, count: usize) {
-        eprintln!("  Fetched {} tasks", count);
+    fn on_tasks_fetched(&self, entity_key: &str, count: usize) {
+        eprintln!("  [{entity_key}] Fetched {count} tasks");
     }
 
-    fn on_comments_skipped(&self, _entity_key: &str, skipped: usize, total: usize) {
-        eprintln!("  Skipping comments for {}/{} unchanged tasks", skipped, total);
+    fn on_comments_skipped(&self, entity_key: &str, skipped: usize, total: usize) {
+        eprintln!("  [{entity_key}] Skipping comments for {skipped}/{total} unchanged tasks");
     }
 
-    fn on_comments_progress(&self, _entity_key: &str, current: usize, total: usize) {
+    fn on_comments_progress(&self, entity_key: &str, current: usize, total: usize) {
         if current == total {
-            eprint!("\r  Fetching comments: {}/{}   \n", current, total);
+            eprint!("\r  [{entity_key}] Fetching comments: {current}/{total}   \n");
         } else {
-            eprint!("\r  Fetching comments: {}/{}   ", current, total);
+            eprint!("\r  [{entity_key}] Fetching comments: {current}/{total}   ");
         }
     }
 
-    fn on_incremental_sync(&self, _entity_key: &str, changed_tasks: usize) {
-        eprintln!("  Incremental: {} tasks changed", changed_tasks);
+    fn on_incremental_sync(&self, entity_key: &str, changed_tasks: usize) {
+        eprintln!("  [{entity_key}] Incremental: {changed_tasks} tasks changed");
     }
 
     fn on_entity_complete(&self, report: &asanadw::SyncReport) {
-        eprintln!("  Done: {} items synced", report.items_synced);
+        eprintln!("  [{}] Done: {} items synced", report.entity_key, report.items_synced);
     }
 }
 
