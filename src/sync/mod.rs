@@ -6,6 +6,22 @@ pub mod syncer;
 use chrono::NaiveDate;
 use serde::Serialize;
 
+/// Trait for receiving progress callbacks during sync operations.
+///
+/// All methods have default no-op implementations so consumers only need
+/// to override the callbacks they care about. Library users who don't
+/// need progress can pass `&NoopProgress`.
+pub trait SyncProgress: Send + Sync {
+    fn on_entity_start(&self, _entity_key: &str, _index: usize, _total: usize) {}
+    fn on_tasks_fetched(&self, _entity_key: &str, _count: usize) {}
+    fn on_comments_progress(&self, _entity_key: &str, _current: usize, _total: usize) {}
+    fn on_entity_complete(&self, _report: &SyncReport) {}
+}
+
+/// No-op implementation of `SyncProgress` for callers that don't need progress.
+pub struct NoopProgress;
+impl SyncProgress for NoopProgress {}
+
 /// Options controlling a sync operation.
 #[derive(Debug, Clone)]
 pub struct SyncOptions {

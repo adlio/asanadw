@@ -4,7 +4,7 @@ use crate::error::Result;
 use crate::storage::repository;
 use crate::storage::Database;
 use crate::sync::rate_limit::retry_api;
-use crate::sync::{SyncOptions, SyncReport, SyncStatus};
+use crate::sync::{SyncOptions, SyncProgress, SyncReport, SyncStatus};
 
 /// Sync a single project's tasks and metadata to the database.
 ///
@@ -17,6 +17,7 @@ pub async fn sync_project(
     client: &asanaclient::Client,
     project_gid: &str,
     options: &SyncOptions,
+    progress: &dyn SyncProgress,
 ) -> Result<SyncReport> {
     let entity_key = format!("project:{project_gid}");
 
@@ -93,9 +94,13 @@ pub async fn sync_project(
     ];
     let tasks: Vec<asanaclient::Task> = retry_api!(client.get_all(&path, &query_params))?;
 
+    progress.on_tasks_fetched(&entity_key, tasks.len());
+
     // Fetch comments for each task
+    let total_tasks = tasks.len();
     let mut task_comments: Vec<(String, Vec<asanaclient::Story>)> = Vec::new();
-    for task in &tasks {
+    for (i, task) in tasks.iter().enumerate() {
+        progress.on_comments_progress(&entity_key, i + 1, total_tasks);
         let task_gid = task.gid.clone();
         match retry_api!(client.tasks().comments(&task_gid)) {
             Ok(comments) => {
@@ -201,6 +206,7 @@ pub async fn sync_user(
     workspace_gid: &str,
     user_gid: &str,
     options: &SyncOptions,
+    progress: &dyn SyncProgress,
 ) -> Result<SyncReport> {
     let entity_key = format!("user:{user_gid}");
     let today = chrono::Local::now().date_naive();
@@ -227,6 +233,8 @@ pub async fn sync_user(
         Some(user_gid),
     )
     .await?;
+
+    progress.on_tasks_fetched(&entity_key, tasks.len());
 
     let task_count = tasks.len() as u64;
 
@@ -271,6 +279,7 @@ pub async fn sync_team(
     _workspace_gid: &str,
     team_gid: &str,
     options: &SyncOptions,
+    progress: &dyn SyncProgress,
 ) -> Result<SyncReport> {
     let entity_key = format!("team:{team_gid}");
 
@@ -301,7 +310,7 @@ pub async fn sync_team(
         if project_ref.archived {
             continue;
         }
-        match sync_project(db, client, &project_ref.gid, options).await {
+        match sync_project(db, client, &project_ref.gid, options, progress).await {
             Ok(report) => {
                 total_synced += report.items_synced;
             }
@@ -331,6 +340,7 @@ pub async fn sync_portfolio(
     client: &asanaclient::Client,
     portfolio_gid: &str,
     options: &SyncOptions,
+    progress: &dyn SyncProgress,
 ) -> Result<SyncReport> {
     let entity_key = format!("portfolio:{portfolio_gid}");
 
@@ -362,7 +372,7 @@ pub async fn sync_portfolio(
 
         if resource_type == "project" {
             project_count += 1;
-            match sync_project(db, client, gid, options).await {
+            match sync_project(db, client, gid, options, progress).await {
                 Ok(report) => {
                     total_synced += report.items_synced;
                     // Link portfolio to project only after project exists

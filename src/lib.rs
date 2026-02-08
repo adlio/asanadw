@@ -16,7 +16,7 @@ pub use query::builder::QueryBuilder;
 pub use query::period::Period;
 pub use search::{SearchHit, SearchHitType, SearchOptions, SearchResults};
 pub use storage::Database;
-pub use sync::{SyncOptions, SyncReport, SyncStatus};
+pub use sync::{NoopProgress, SyncOptions, SyncProgress, SyncReport, SyncStatus};
 pub use url::{generate_asana_url, parse_asana_url, AsanaUrlInfo};
 
 // Re-export repository types needed by the binary crate, but not the module itself
@@ -155,41 +155,49 @@ impl AsanaDW {
         &self,
         identifier: &str,
         options: &SyncOptions,
+        progress: &dyn SyncProgress,
     ) -> Result<SyncReport> {
         let gid = url::resolve_gid(identifier)?;
-        syncer::sync_project(&self.db, &self.client, &gid, options).await
+        syncer::sync_project(&self.db, &self.client, &gid, options, progress).await
     }
 
     pub async fn sync_user(
         &self,
         identifier: &str,
         options: &SyncOptions,
+        progress: &dyn SyncProgress,
     ) -> Result<SyncReport> {
         let workspace_gid = self.workspace_gid().await?;
         let gid = url::resolve_gid(identifier)?;
-        syncer::sync_user(&self.db, &self.client, &workspace_gid, &gid, options).await
+        syncer::sync_user(&self.db, &self.client, &workspace_gid, &gid, options, progress).await
     }
 
     pub async fn sync_team(
         &self,
         identifier: &str,
         options: &SyncOptions,
+        progress: &dyn SyncProgress,
     ) -> Result<SyncReport> {
         let workspace_gid = self.workspace_gid().await?;
         let gid = url::resolve_gid(identifier)?;
-        syncer::sync_team(&self.db, &self.client, &workspace_gid, &gid, options).await
+        syncer::sync_team(&self.db, &self.client, &workspace_gid, &gid, options, progress).await
     }
 
     pub async fn sync_portfolio(
         &self,
         identifier: &str,
         options: &SyncOptions,
+        progress: &dyn SyncProgress,
     ) -> Result<SyncReport> {
         let gid = url::resolve_gid(identifier)?;
-        syncer::sync_portfolio(&self.db, &self.client, &gid, options).await
+        syncer::sync_portfolio(&self.db, &self.client, &gid, options, progress).await
     }
 
-    pub async fn sync_all(&self, options: &SyncOptions) -> Result<Vec<SyncReport>> {
+    pub async fn sync_all(
+        &self,
+        options: &SyncOptions,
+        progress: &dyn SyncProgress,
+    ) -> Result<Vec<SyncReport>> {
         // Auto-detect user identity on first sync
         if let Err(e) = self.ensure_user_identity().await {
             log::warn!("Could not auto-detect user identity: {e}");
@@ -203,24 +211,27 @@ impl AsanaDW {
             })
             .await?;
 
+        let total = entities.len();
         let mut reports = Vec::new();
-        for entity in &entities {
+        for (i, entity) in entities.iter().enumerate() {
+            progress.on_entity_start(&entity.entity_key, i, total);
+
             let result = match entity.entity_type.as_str() {
                 "project" => {
-                    syncer::sync_project(&self.db, &self.client, &entity.entity_gid, options).await
+                    syncer::sync_project(&self.db, &self.client, &entity.entity_gid, options, progress).await
                 }
                 "user" => {
                     let ws = self.workspace_gid().await?;
-                    syncer::sync_user(&self.db, &self.client, &ws, &entity.entity_gid, options)
+                    syncer::sync_user(&self.db, &self.client, &ws, &entity.entity_gid, options, progress)
                         .await
                 }
                 "team" => {
                     let ws = self.workspace_gid().await?;
-                    syncer::sync_team(&self.db, &self.client, &ws, &entity.entity_gid, options)
+                    syncer::sync_team(&self.db, &self.client, &ws, &entity.entity_gid, options, progress)
                         .await
                 }
                 "portfolio" => {
-                    syncer::sync_portfolio(&self.db, &self.client, &entity.entity_gid, options)
+                    syncer::sync_portfolio(&self.db, &self.client, &entity.entity_gid, options, progress)
                         .await
                 }
                 other => {
@@ -229,10 +240,13 @@ impl AsanaDW {
                 }
             };
             match result {
-                Ok(report) => reports.push(report),
+                Ok(report) => {
+                    progress.on_entity_complete(&report);
+                    reports.push(report);
+                }
                 Err(e) => {
                     log::error!("Failed to sync {}: {e}", entity.entity_key);
-                    reports.push(SyncReport {
+                    let report = SyncReport {
                         entity_key: entity.entity_key.clone(),
                         status: SyncStatus::Failed,
                         items_synced: 0,
@@ -240,7 +254,9 @@ impl AsanaDW {
                         batches_completed: 0,
                         batches_total: 0,
                         error: Some(e.to_string()),
-                    });
+                    };
+                    progress.on_entity_complete(&report);
+                    reports.push(report);
                 }
             }
         }

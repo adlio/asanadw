@@ -11,8 +11,37 @@ struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
 
+    /// Page size for Asana API requests (default: API default of 100)
+    #[arg(long)]
+    page_size: Option<u32>,
+
     #[command(subcommand)]
     command: Commands,
+}
+
+/// Progress reporter that writes to stderr.
+struct StderrProgress;
+
+impl asanadw::SyncProgress for StderrProgress {
+    fn on_entity_start(&self, entity_key: &str, index: usize, total: usize) {
+        eprintln!("[{}/{}] Syncing {}...", index + 1, total, entity_key);
+    }
+
+    fn on_tasks_fetched(&self, _entity_key: &str, count: usize) {
+        eprintln!("  Fetched {} tasks", count);
+    }
+
+    fn on_comments_progress(&self, _entity_key: &str, current: usize, total: usize) {
+        if current == total {
+            eprint!("\r  Fetching comments: {}/{}   \n", current, total);
+        } else {
+            eprint!("\r  Fetching comments: {}/{}   ", current, total);
+        }
+    }
+
+    fn on_entity_complete(&self, report: &asanadw::SyncReport) {
+        eprintln!("  Done: {} items synced", report.items_synced);
+    }
 }
 
 #[derive(Subcommand)]
@@ -437,7 +466,10 @@ async fn main() -> anyhow::Result<()> {
             handle_monitor(&dw, action).await?;
         }
         Commands::Sync { target } => {
-            let client = asanaclient::Client::from_env()?;
+            let mut client = asanaclient::Client::from_env()?;
+            if let Some(ps) = cli.page_size {
+                client = client.with_page_size(ps);
+            }
             let dw = asanadw::AsanaDW::new(db, client);
             handle_sync(&dw, target).await?;
         }
@@ -582,30 +614,31 @@ async fn handle_monitor(dw: &asanadw::AsanaDW, action: MonitorAction) -> anyhow:
 }
 
 async fn handle_sync(dw: &asanadw::AsanaDW, target: SyncTarget) -> anyhow::Result<()> {
+    let progress = StderrProgress;
     match target {
         SyncTarget::Project { identifier, days, since } => {
             let options = make_sync_options(days, since.as_deref());
-            let report = dw.sync_project(&identifier, &options).await?;
+            let report = dw.sync_project(&identifier, &options, &progress).await?;
             print_sync_report(&report);
         }
         SyncTarget::User { identifier, days, since } => {
             let options = make_sync_options(days, since.as_deref());
-            let report = dw.sync_user(&identifier, &options).await?;
+            let report = dw.sync_user(&identifier, &options, &progress).await?;
             print_sync_report(&report);
         }
         SyncTarget::Team { identifier, days, since } => {
             let options = make_sync_options(days, since.as_deref());
-            let report = dw.sync_team(&identifier, &options).await?;
+            let report = dw.sync_team(&identifier, &options, &progress).await?;
             print_sync_report(&report);
         }
         SyncTarget::Portfolio { identifier, days, since } => {
             let options = make_sync_options(days, since.as_deref());
-            let report = dw.sync_portfolio(&identifier, &options).await?;
+            let report = dw.sync_portfolio(&identifier, &options, &progress).await?;
             print_sync_report(&report);
         }
         SyncTarget::All { days, since } => {
             let options = make_sync_options(days, since.as_deref());
-            let reports = dw.sync_all(&options).await?;
+            let reports = dw.sync_all(&options, &progress).await?;
             for report in &reports {
                 print_sync_report(report);
                 println!();
