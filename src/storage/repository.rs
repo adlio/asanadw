@@ -532,6 +532,19 @@ pub fn list_monitored_entities(
     rows.collect()
 }
 
+pub fn get_last_sync_at(
+    conn: &Connection,
+    entity_key: &str,
+) -> Result<Option<String>, rusqlite::Error> {
+    conn.query_row(
+        "SELECT last_sync_at FROM monitored_entities WHERE entity_key = ?1",
+        params![entity_key],
+        |row| row.get(0),
+    )
+    .optional()
+    .map(|opt| opt.flatten())
+}
+
 pub fn update_monitored_entity_sync_time(
     conn: &Connection,
     entity_key: &str,

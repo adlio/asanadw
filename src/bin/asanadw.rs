@@ -31,6 +31,10 @@ impl asanadw::SyncProgress for StderrProgress {
         eprintln!("  Fetched {} tasks", count);
     }
 
+    fn on_comments_skipped(&self, _entity_key: &str, skipped: usize, total: usize) {
+        eprintln!("  Skipping comments for {}/{} unchanged tasks", skipped, total);
+    }
+
     fn on_comments_progress(&self, _entity_key: &str, current: usize, total: usize) {
         if current == total {
             eprint!("\r  Fetching comments: {}/{}   \n", current, total);

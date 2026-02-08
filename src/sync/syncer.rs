@@ -21,6 +21,15 @@ pub async fn sync_project(
 ) -> Result<SyncReport> {
     let entity_key = format!("project:{project_gid}");
 
+    // Check when we last synced this entity (used to skip unchanged tasks' comments)
+    let last_sync_at: Option<String> = db
+        .reader()
+        .call({
+            let entity_key = entity_key.clone();
+            move |conn| repository::get_last_sync_at(conn, &entity_key)
+        })
+        .await?;
+
     // Fetch project details and upsert
     let project = retry_api!(client.projects().get_full(project_gid))?;
 
@@ -96,11 +105,28 @@ pub async fn sync_project(
 
     progress.on_tasks_fetched(&entity_key, tasks.len());
 
-    // Fetch comments for each task
+    // Fetch comments only for tasks modified since our last sync.
+    // Tasks whose modified_at predates last_sync_at already have their comments stored.
     let total_tasks = tasks.len();
+    let mut tasks_needing_comments: Vec<&asanaclient::Task> = Vec::new();
+    for task in &tasks {
+        let needs_fetch = match (&task.modified_at, &last_sync_at) {
+            (Some(modified), Some(synced)) => modified.as_str() > synced.as_str(),
+            _ => true, // No modified_at or never synced → fetch
+        };
+        if needs_fetch {
+            tasks_needing_comments.push(task);
+        }
+    }
+    let skipped = total_tasks - tasks_needing_comments.len();
+    if skipped > 0 {
+        progress.on_comments_skipped(&entity_key, skipped, total_tasks);
+    }
+
     let mut task_comments: Vec<(String, Vec<asanaclient::Story>)> = Vec::new();
-    for (i, task) in tasks.iter().enumerate() {
-        progress.on_comments_progress(&entity_key, i + 1, total_tasks);
+    let comments_total = tasks_needing_comments.len();
+    for (i, task) in tasks_needing_comments.iter().enumerate() {
+        progress.on_comments_progress(&entity_key, i + 1, comments_total);
         let task_gid = task.gid.clone();
         match retry_api!(client.tasks().comments(&task_gid)) {
             Ok(comments) => {
