@@ -16,6 +16,7 @@ pub trait SyncProgress: Send + Sync {
     fn on_tasks_fetched(&self, _entity_key: &str, _count: usize) {}
     fn on_comments_skipped(&self, _entity_key: &str, _skipped: usize, _total: usize) {}
     fn on_comments_progress(&self, _entity_key: &str, _current: usize, _total: usize) {}
+    fn on_incremental_sync(&self, _entity_key: &str, _changed_tasks: usize) {}
     fn on_entity_complete(&self, _report: &SyncReport) {}
 }
 
@@ -28,6 +29,8 @@ impl SyncProgress for NoopProgress {}
 pub struct SyncOptions {
     pub since: Option<NaiveDate>,
     pub days: Option<u32>,
+    /// Force a full sync even if an incremental sync token is available.
+    pub full: bool,
 }
 
 impl SyncOptions {

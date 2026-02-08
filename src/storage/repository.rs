@@ -567,6 +567,33 @@ pub struct MonitoredEntity {
     pub sync_enabled: bool,
 }
 
+// ── Event Sync Tokens ──────────────────────────────────────────────
+
+pub fn get_event_sync_token(
+    conn: &Connection,
+    entity_key: &str,
+) -> Result<Option<String>, rusqlite::Error> {
+    conn.query_row(
+        "SELECT event_sync_token FROM monitored_entities WHERE entity_key = ?1",
+        params![entity_key],
+        |row| row.get(0),
+    )
+    .optional()
+    .map(|opt| opt.flatten())
+}
+
+pub fn set_event_sync_token(
+    conn: &Connection,
+    entity_key: &str,
+    token: &str,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE monitored_entities SET event_sync_token = ?2 WHERE entity_key = ?1",
+        params![entity_key, token],
+    )?;
+    Ok(())
+}
+
 // ── Config ─────────────────────────────────────────────────────────
 
 pub fn get_config(conn: &Connection, key: &str) -> Result<Option<String>, rusqlite::Error> {
@@ -912,6 +939,85 @@ mod tests {
 
                 // Non-GID, non-email string returns None
                 assert_eq!(resolve_user_identifier(conn, "some-name")?, None);
+
+                Ok::<(), rusqlite::Error>(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_event_sync_token_round_trip() {
+        let db = Database::open_memory().await.unwrap();
+
+        db.writer()
+            .call(|conn| {
+                // Add a monitored entity first
+                add_monitored_entity(conn, "project:123", "project", "123", Some("Test Project"))?;
+
+                // Initially token should be None
+                let token = get_event_sync_token(conn, "project:123")?;
+                assert_eq!(token, None);
+
+                // Set a token
+                set_event_sync_token(conn, "project:123", "token_abc_123")?;
+
+                // Retrieve the token
+                let token = get_event_sync_token(conn, "project:123")?;
+                assert_eq!(token, Some("token_abc_123".to_string()));
+
+                // Update the token
+                set_event_sync_token(conn, "project:123", "token_xyz_456")?;
+
+                // Verify it was updated
+                let token = get_event_sync_token(conn, "project:123")?;
+                assert_eq!(token, Some("token_xyz_456".to_string()));
+
+                Ok::<(), rusqlite::Error>(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_event_sync_token_nonexistent_entity() {
+        let db = Database::open_memory().await.unwrap();
+
+        db.writer()
+            .call(|conn| {
+                // Get token for entity that doesn't exist
+                let token = get_event_sync_token(conn, "project:999")?;
+                assert_eq!(token, None);
+
+                Ok::<(), rusqlite::Error>(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_event_sync_token_multiple_entities() {
+        let db = Database::open_memory().await.unwrap();
+
+        db.writer()
+            .call(|conn| {
+                // Add multiple monitored entities
+                add_monitored_entity(conn, "project:100", "project", "100", Some("Project 1"))?;
+                add_monitored_entity(conn, "project:200", "project", "200", Some("Project 2"))?;
+
+                // Set different tokens for each
+                set_event_sync_token(conn, "project:100", "token_for_100")?;
+                set_event_sync_token(conn, "project:200", "token_for_200")?;
+
+                // Verify each entity has its own token
+                assert_eq!(
+                    get_event_sync_token(conn, "project:100")?,
+                    Some("token_for_100".to_string())
+                );
+                assert_eq!(
+                    get_event_sync_token(conn, "project:200")?,
+                    Some("token_for_200".to_string())
+                );
 
                 Ok::<(), rusqlite::Error>(())
             })

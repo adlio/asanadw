@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use chrono::Duration;
 
 use crate::error::Result;
@@ -6,13 +8,294 @@ use crate::storage::Database;
 use crate::sync::rate_limit::retry_api;
 use crate::sync::{SyncOptions, SyncProgress, SyncReport, SyncStatus};
 
+/// Maximum number of changed tasks before falling back to full sync.
+/// If events report more changes than this, individual GETs would be slower
+/// than a bulk fetch.
+const INCREMENTAL_THRESHOLD: usize = 50;
+
+/// Task fields requested during project sync (both incremental and full).
+const PROJECT_TASK_FIELDS: &str = "gid,name,completed,completed_at,assignee,assignee.name,assignee.email,due_on,due_at,start_on,start_at,created_at,modified_at,notes,html_notes,parent,parent.name,num_subtasks,num_likes,memberships,memberships.project,memberships.project.name,memberships.section,memberships.section.name,tags,tags.name,custom_fields,custom_fields.gid,custom_fields.name,custom_fields.display_value,custom_fields.resource_subtype,custom_fields.text_value,custom_fields.number_value,custom_fields.enum_value,custom_fields.enum_value.gid,custom_fields.enum_value.name,custom_fields.enum_value.color,custom_fields.enum_value.enabled,custom_fields.multi_enum_values,custom_fields.multi_enum_values.gid,custom_fields.multi_enum_values.name,custom_fields.multi_enum_values.color,custom_fields.multi_enum_values.enabled,custom_fields.date_value,custom_fields.date_value.date,custom_fields.date_value.date_time,permalink_url";
+
 /// Sync a single project's tasks and metadata to the database.
 ///
-/// The Asana `/projects/{gid}/tasks` endpoint does NOT support `modified_since`.
-/// It only supports `completed_since` (to exclude old completed tasks) and `opt_fields`.
-/// We fetch all tasks in one paginated call, using `completed_since` to skip tasks
-/// that were completed before our lookback window.
+/// Attempts incremental sync via the Asana Events API first. Falls back to
+/// a full sync when: (a) no sync token exists, (b) the token has expired,
+/// (c) the `--full` flag is set, or (d) incremental sync encounters an error.
 pub async fn sync_project(
+    db: &Database,
+    client: &asanaclient::Client,
+    project_gid: &str,
+    options: &SyncOptions,
+    progress: &dyn SyncProgress,
+) -> Result<SyncReport> {
+    // Try incremental sync via events
+    if !options.full {
+        match sync_project_incremental(db, client, project_gid, options, progress).await {
+            Ok(Some(report)) => return Ok(report), // Incremental succeeded
+            Ok(None) => {}                          // No token or expired, fall through
+            Err(e) => log::warn!("Incremental sync failed, falling back to full: {e}"),
+        }
+    }
+
+    // Full sync (existing logic)
+    sync_project_full(db, client, project_gid, options, progress).await
+}
+
+/// Attempt incremental sync for a project using the Asana Events API.
+///
+/// Returns:
+/// - `Ok(Some(report))` if incremental sync succeeded
+/// - `Ok(None)` if no token exists or the token expired (caller should do full sync)
+/// - `Err(e)` if an unexpected error occurred
+async fn sync_project_incremental(
+    db: &Database,
+    client: &asanaclient::Client,
+    project_gid: &str,
+    _options: &SyncOptions,
+    progress: &dyn SyncProgress,
+) -> Result<Option<SyncReport>> {
+    let entity_key = format!("project:{project_gid}");
+
+    // Read existing sync token
+    let token: Option<String> = db
+        .reader()
+        .call({
+            let entity_key = entity_key.clone();
+            move |conn| repository::get_event_sync_token(conn, &entity_key)
+        })
+        .await?;
+
+    let token = match token {
+        Some(t) => t,
+        None => {
+            // No token — establish one, then signal full sync needed
+            log::info!("No event sync token for {entity_key}, establishing...");
+            match client.events().establish(project_gid).await {
+                Ok(new_token) => {
+                    db.writer()
+                        .call({
+                            let entity_key = entity_key.clone();
+                            move |conn| {
+                                repository::set_event_sync_token(conn, &entity_key, &new_token)
+                            }
+                        })
+                        .await?;
+                }
+                Err(e) => {
+                    log::warn!("Failed to establish event sync token: {e}");
+                }
+            }
+            return Ok(None);
+        }
+    };
+
+    // Fetch events since the token
+    let events_response = match client.events().get_events(project_gid, &token).await {
+        Ok(resp) => resp,
+        Err(asanaclient::Error::SyncTokenExpired { sync }) => {
+            // Token expired — store the fresh token and signal full sync
+            log::info!("Event sync token expired for {entity_key}, storing fresh token");
+            db.writer()
+                .call({
+                    let entity_key = entity_key.clone();
+                    move |conn| repository::set_event_sync_token(conn, &entity_key, &sync)
+                })
+                .await?;
+            return Ok(None);
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    // Extract the set of task GIDs that changed
+    let mut changed_task_gids: HashSet<String> = HashSet::new();
+    for event in &events_response.data {
+        let resource_type = event
+            .resource
+            .resource_type
+            .as_deref()
+            .or(event.resource_type.as_deref())
+            .unwrap_or("");
+        if resource_type != "task" {
+            continue;
+        }
+        match event.action.as_str() {
+            "changed" | "added" | "undeleted" => {
+                changed_task_gids.insert(event.resource.gid.clone());
+            }
+            // deleted/removed: defer to next full sync for cleanup
+            _ => {}
+        }
+    }
+
+    // If no tasks changed, just update the token and return
+    if changed_task_gids.is_empty() {
+        let new_token = events_response.sync.clone();
+        db.writer()
+            .call({
+                let entity_key = entity_key.clone();
+                move |conn| {
+                    repository::set_event_sync_token(conn, &entity_key, &new_token)?;
+                    repository::update_monitored_entity_sync_time(conn, &entity_key)?;
+                    Ok::<(), rusqlite::Error>(())
+                }
+            })
+            .await?;
+
+        progress.on_incremental_sync(&entity_key, 0);
+
+        return Ok(Some(SyncReport {
+            entity_key,
+            status: SyncStatus::Success,
+            items_synced: 0,
+            items_failed: 0,
+            batches_completed: 1,
+            batches_total: 1,
+            error: None,
+        }));
+    }
+
+    // If too many changes, fall back to full sync (store the new token first)
+    if changed_task_gids.len() > INCREMENTAL_THRESHOLD {
+        log::info!(
+            "{} tasks changed for {entity_key} (threshold: {INCREMENTAL_THRESHOLD}), falling back to full sync",
+            changed_task_gids.len()
+        );
+        let new_token = events_response.sync.clone();
+        db.writer()
+            .call({
+                let entity_key = entity_key.clone();
+                move |conn| repository::set_event_sync_token(conn, &entity_key, &new_token)
+            })
+            .await?;
+        return Ok(None);
+    }
+
+    progress.on_incremental_sync(&entity_key, changed_task_gids.len());
+
+    // Fetch full task data for each changed task
+    let mut tasks: Vec<asanaclient::Task> = Vec::new();
+    let mut fetch_failures: u64 = 0;
+    for gid in &changed_task_gids {
+        let path = format!("/tasks/{gid}");
+        let query_params = [("opt_fields", PROJECT_TASK_FIELDS)];
+        match retry_api!(client.get::<asanaclient::Task>(&path, &query_params)) {
+            Ok(task) => tasks.push(task),
+            Err(crate::error::Error::Api(asanaclient::Error::NotFound(_))) => {
+                // Task was deleted — skip it for now; full sync handles cleanup
+                log::debug!("Task {gid} not found (likely deleted), skipping");
+            }
+            Err(e) => {
+                log::warn!("Failed to fetch task {gid}: {e}");
+                fetch_failures += 1;
+            }
+        }
+    }
+
+    progress.on_tasks_fetched(&entity_key, tasks.len());
+
+    // Fetch comments for each changed task
+    let mut task_comments: Vec<(String, Vec<asanaclient::Story>)> = Vec::new();
+    let comments_total = tasks.len();
+    for (i, task) in tasks.iter().enumerate() {
+        progress.on_comments_progress(&entity_key, i + 1, comments_total);
+        let task_gid = task.gid.clone();
+        match retry_api!(client.tasks().comments(&task_gid)) {
+            Ok(comments) => {
+                task_comments.push((task.gid.clone(), comments));
+            }
+            Err(e) => {
+                log::warn!("Failed to fetch comments for task {}: {e}", task.gid);
+                task_comments.push((task.gid.clone(), Vec::new()));
+            }
+        }
+    }
+
+    let total_synced = tasks.len() as u64;
+
+    // Write changed tasks and comments to DB
+    let new_token = events_response.sync.clone();
+    db.writer()
+        .call({
+            let tasks = tasks.clone();
+            let entity_key = entity_key.clone();
+            move |conn| {
+                // Upsert referenced users BEFORE tasks (FK constraints)
+                for task in &tasks {
+                    if let Some(ref assignee) = task.assignee {
+                        repository::upsert_user_minimal_with_email(
+                            conn,
+                            &assignee.gid,
+                            assignee.name.as_deref(),
+                            assignee.email.as_deref(),
+                        )?;
+                    }
+                }
+                for (_task_gid, comments) in &task_comments {
+                    for comment in comments {
+                        if let Some(ref author) = comment.created_by {
+                            repository::upsert_user_minimal(
+                                conn,
+                                &author.gid,
+                                author.name.as_deref(),
+                            )?;
+                        }
+                    }
+                }
+
+                // Temporarily disable FK checks for tasks — parent_gid may reference
+                // tasks not yet synced
+                conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+
+                for task in &tasks {
+                    repository::upsert_task(conn, task)?;
+                }
+
+                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+
+                // Upsert comments
+                for (task_gid, comments) in &task_comments {
+                    for comment in comments {
+                        repository::upsert_comment(conn, task_gid, comment)?;
+                    }
+                }
+
+                // Update sync token and timestamp
+                repository::set_event_sync_token(conn, &entity_key, &new_token)?;
+                repository::update_monitored_entity_sync_time(conn, &entity_key)?;
+
+                Ok::<(), rusqlite::Error>(())
+            }
+        })
+        .await?;
+
+    let status = if fetch_failures == 0 {
+        SyncStatus::Success
+    } else if total_synced > 0 {
+        SyncStatus::PartialFailure
+    } else {
+        SyncStatus::Failed
+    };
+
+    Ok(Some(SyncReport {
+        entity_key,
+        status,
+        items_synced: total_synced,
+        items_failed: fetch_failures,
+        batches_completed: 1,
+        batches_total: 1,
+        error: if fetch_failures > 0 {
+            Some(format!("{fetch_failures} task fetches failed"))
+        } else {
+            None
+        },
+    }))
+}
+
+/// Full sync for a project: re-fetch all tasks and comments.
+///
+/// This is the original sync logic, used as fallback when incremental sync
+/// is not possible (first run, expired token, --full flag).
+async fn sync_project_full(
     db: &Database,
     client: &asanaclient::Client,
     project_gid: &str,
@@ -94,11 +377,10 @@ pub async fn sync_project(
 
     // Fetch all tasks from the project.
     // `completed_since` returns all incomplete tasks PLUS tasks completed after the given time.
-    let fields = "gid,name,completed,completed_at,assignee,assignee.name,assignee.email,due_on,due_at,start_on,start_at,created_at,modified_at,notes,html_notes,parent,parent.name,num_subtasks,num_likes,memberships,memberships.project,memberships.project.name,memberships.section,memberships.section.name,tags,tags.name,custom_fields,custom_fields.gid,custom_fields.name,custom_fields.display_value,custom_fields.resource_subtype,custom_fields.text_value,custom_fields.number_value,custom_fields.enum_value,custom_fields.enum_value.gid,custom_fields.enum_value.name,custom_fields.enum_value.color,custom_fields.enum_value.enabled,custom_fields.multi_enum_values,custom_fields.multi_enum_values.gid,custom_fields.multi_enum_values.name,custom_fields.multi_enum_values.color,custom_fields.multi_enum_values.enabled,custom_fields.date_value,custom_fields.date_value.date,custom_fields.date_value.date_time,permalink_url";
     let completed_since = format!("{}T00:00:00.000Z", since);
     let path = format!("/projects/{project_gid}/tasks");
     let query_params = [
-        ("opt_fields", fields),
+        ("opt_fields", PROJECT_TASK_FIELDS),
         ("completed_since", completed_since.as_str()),
     ];
     let tasks: Vec<asanaclient::Task> = retry_api!(client.get_all(&path, &query_params))?;
@@ -213,6 +495,23 @@ pub async fn sync_project(
             }
         })
         .await?;
+
+    // Establish a fresh event sync token so the next sync can be incremental
+    match client.events().establish(project_gid).await {
+        Ok(new_token) => {
+            db.writer()
+                .call({
+                    let entity_key = entity_key.clone();
+                    move |conn| {
+                        repository::set_event_sync_token(conn, &entity_key, &new_token)
+                    }
+                })
+                .await?;
+        }
+        Err(e) => {
+            log::warn!("Failed to establish event sync token after full sync: {e}");
+        }
+    }
 
     Ok(SyncReport {
         entity_key,

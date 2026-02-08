@@ -43,6 +43,10 @@ impl asanadw::SyncProgress for StderrProgress {
         }
     }
 
+    fn on_incremental_sync(&self, _entity_key: &str, changed_tasks: usize) {
+        eprintln!("  Incremental: {} tasks changed", changed_tasks);
+    }
+
     fn on_entity_complete(&self, report: &asanadw::SyncReport) {
         eprintln!("  Done: {} items synced", report.items_synced);
     }
@@ -293,6 +297,9 @@ enum SyncTarget {
         /// Sync data since this date (YYYY-MM-DD)
         #[arg(long)]
         since: Option<String>,
+        /// Force a full sync (skip incremental)
+        #[arg(long)]
+        full: bool,
     },
     /// Sync a user's tasks
     User {
@@ -311,6 +318,9 @@ enum SyncTarget {
         days: Option<u32>,
         #[arg(long)]
         since: Option<String>,
+        /// Force a full sync (skip incremental)
+        #[arg(long)]
+        full: bool,
     },
     /// Sync a portfolio's projects
     Portfolio {
@@ -320,6 +330,9 @@ enum SyncTarget {
         days: Option<u32>,
         #[arg(long)]
         since: Option<String>,
+        /// Force a full sync (skip incremental)
+        #[arg(long)]
+        full: bool,
     },
     /// Sync all monitored entities
     All {
@@ -327,6 +340,9 @@ enum SyncTarget {
         days: Option<u32>,
         #[arg(long)]
         since: Option<String>,
+        /// Force a full sync (skip incremental)
+        #[arg(long)]
+        full: bool,
     },
 }
 
@@ -620,28 +636,28 @@ async fn handle_monitor(dw: &asanadw::AsanaDW, action: MonitorAction) -> anyhow:
 async fn handle_sync(dw: &asanadw::AsanaDW, target: SyncTarget) -> anyhow::Result<()> {
     let progress = StderrProgress;
     match target {
-        SyncTarget::Project { identifier, days, since } => {
-            let options = make_sync_options(days, since.as_deref());
+        SyncTarget::Project { identifier, days, since, full } => {
+            let options = make_sync_options(days, since.as_deref(), full);
             let report = dw.sync_project(&identifier, &options, &progress).await?;
             print_sync_report(&report);
         }
         SyncTarget::User { identifier, days, since } => {
-            let options = make_sync_options(days, since.as_deref());
+            let options = make_sync_options(days, since.as_deref(), false);
             let report = dw.sync_user(&identifier, &options, &progress).await?;
             print_sync_report(&report);
         }
-        SyncTarget::Team { identifier, days, since } => {
-            let options = make_sync_options(days, since.as_deref());
+        SyncTarget::Team { identifier, days, since, full } => {
+            let options = make_sync_options(days, since.as_deref(), full);
             let report = dw.sync_team(&identifier, &options, &progress).await?;
             print_sync_report(&report);
         }
-        SyncTarget::Portfolio { identifier, days, since } => {
-            let options = make_sync_options(days, since.as_deref());
+        SyncTarget::Portfolio { identifier, days, since, full } => {
+            let options = make_sync_options(days, since.as_deref(), full);
             let report = dw.sync_portfolio(&identifier, &options, &progress).await?;
             print_sync_report(&report);
         }
-        SyncTarget::All { days, since } => {
-            let options = make_sync_options(days, since.as_deref());
+        SyncTarget::All { days, since, full } => {
+            let options = make_sync_options(days, since.as_deref(), full);
             let reports = dw.sync_all(&options, &progress).await?;
             for report in &reports {
                 print_sync_report(report);
@@ -655,10 +671,11 @@ async fn handle_sync(dw: &asanadw::AsanaDW, target: SyncTarget) -> anyhow::Resul
     Ok(())
 }
 
-fn make_sync_options(days: Option<u32>, since: Option<&str>) -> asanadw::SyncOptions {
+fn make_sync_options(days: Option<u32>, since: Option<&str>, full: bool) -> asanadw::SyncOptions {
     asanadw::SyncOptions {
         since: parse_since(since),
         days,
+        full,
     }
 }
 
