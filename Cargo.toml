@@ -3,7 +3,12 @@ name = "asanadw"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+repository = "https://github.com/adlio/asanadw"
 description = "Sync Asana data to a local SQLite data warehouse"
+readme = "README.md"
+keywords = ["asana", "data-warehouse", "sqlite", "sync", "metrics"]
+categories = ["command-line-utilities", "database"]
+exclude = ["docs/", "tmp/", ".cargo-husky/", ".claude/", ".github/", "AGENTS.md"]
 
 [[bin]]
 name = "asanadw"
@@ -30,3 +35,4 @@ anyhow = "1.0"
 
 [dev-dependencies]
 tempfile = "3"
+cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }

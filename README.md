@@ -1,5 +1,9 @@
 # asanadw
 
+[![CI](https://github.com/adlio/asanadw/actions/workflows/ci.yml/badge.svg)](https://github.com/adlio/asanadw/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/adlio/asanadw/branch/main/graph/badge.svg)](https://codecov.io/gh/adlio/asanadw)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Sync Asana data to a local SQLite data warehouse for offline queries, metrics, and LLM-powered summaries.
 
 ## Quick start
