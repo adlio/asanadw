@@ -84,7 +84,7 @@ pub async fn sync_project(
 
     // Fetch all tasks from the project.
     // `completed_since` returns all incomplete tasks PLUS tasks completed after the given time.
-    let fields = "gid,name,completed,completed_at,assignee,assignee.name,assignee.email,due_on,due_at,start_on,start_at,created_at,modified_at,notes,html_notes,parent,parent.name,num_subtasks,num_likes,memberships,memberships.project,memberships.project.name,memberships.section,memberships.section.name,tags,tags.name,custom_fields,custom_fields.gid,custom_fields.name,custom_fields.display_value,custom_fields.resource_subtype,custom_fields.text_value,custom_fields.number_value,custom_fields.enum_value,custom_fields.enum_value.gid,custom_fields.date_value,custom_fields.date_value.date,permalink_url";
+    let fields = "gid,name,completed,completed_at,assignee,assignee.name,assignee.email,due_on,due_at,start_on,start_at,created_at,modified_at,notes,html_notes,parent,parent.name,num_subtasks,num_likes,memberships,memberships.project,memberships.project.name,memberships.section,memberships.section.name,tags,tags.name,custom_fields,custom_fields.gid,custom_fields.name,custom_fields.display_value,custom_fields.resource_subtype,custom_fields.text_value,custom_fields.number_value,custom_fields.enum_value,custom_fields.enum_value.gid,custom_fields.enum_value.name,custom_fields.enum_value.color,custom_fields.enum_value.enabled,custom_fields.multi_enum_values,custom_fields.multi_enum_values.gid,custom_fields.multi_enum_values.name,custom_fields.multi_enum_values.color,custom_fields.multi_enum_values.enabled,custom_fields.date_value,custom_fields.date_value.date,custom_fields.date_value.date_time,permalink_url";
     let completed_since = format!("{}T00:00:00.000Z", since);
     let path = format!("/projects/{project_gid}/tasks");
     let query_params = [
@@ -339,6 +339,10 @@ pub async fn sync_portfolio(
         .call({
             let portfolio = portfolio.clone();
             move |conn| {
+                // Insert referenced owner before the portfolio (FK constraints)
+                if let Some(ref owner) = portfolio.owner {
+                    repository::upsert_user_minimal(conn, &owner.gid, owner.name.as_deref())?;
+                }
                 repository::upsert_portfolio(conn, &portfolio)?;
                 Ok::<(), rusqlite::Error>(())
             }
@@ -357,22 +361,25 @@ pub async fn sync_portfolio(
         let resource_type = item.resource_type.as_str();
 
         if resource_type == "project" {
-            // Link portfolio to project
-            db.writer()
-                .call({
-                    let portfolio_gid = portfolio_gid.to_string();
-                    let project_gid = gid.clone();
-                    move |conn| {
-                        repository::upsert_portfolio_project(conn, &portfolio_gid, &project_gid)?;
-                        Ok::<(), rusqlite::Error>(())
-                    }
-                })
-                .await?;
-
             project_count += 1;
             match sync_project(db, client, gid, options).await {
                 Ok(report) => {
                     total_synced += report.items_synced;
+                    // Link portfolio to project only after project exists
+                    db.writer()
+                        .call({
+                            let portfolio_gid = portfolio_gid.to_string();
+                            let project_gid = gid.clone();
+                            move |conn| {
+                                repository::upsert_portfolio_project(
+                                    conn,
+                                    &portfolio_gid,
+                                    &project_gid,
+                                )?;
+                                Ok::<(), rusqlite::Error>(())
+                            }
+                        })
+                        .await?;
                 }
                 Err(e) => {
                     log::error!("Failed to sync project {gid} in portfolio: {e}");

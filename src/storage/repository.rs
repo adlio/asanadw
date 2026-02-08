@@ -197,14 +197,68 @@ pub fn upsert_task(conn: &Connection, task: &asanaclient::Task) -> Result<(), ru
 
 // ── Custom Fields ──────────────────────────────────────────────────
 
+pub fn upsert_enum_option(
+    conn: &Connection,
+    field_gid: &str,
+    option: &asanaclient::EnumOption,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "INSERT OR REPLACE INTO dim_enum_options (field_gid, option_gid, name, color, enabled, cached_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))",
+        params![
+            field_gid,
+            option.gid,
+            option.name,
+            option.color,
+            option.enabled as i32,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn delete_task_multi_enum_values(
+    conn: &Connection,
+    task_gid: &str,
+    field_gid: &str,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "DELETE FROM bridge_task_multi_enum_values WHERE task_gid = ?1 AND field_gid = ?2",
+        params![task_gid, field_gid],
+    )?;
+    Ok(())
+}
+
+pub fn upsert_task_multi_enum_value(
+    conn: &Connection,
+    task_gid: &str,
+    field_gid: &str,
+    option_gid: &str,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "INSERT OR REPLACE INTO bridge_task_multi_enum_values (task_gid, field_gid, option_gid)
+         VALUES (?1, ?2, ?3)",
+        params![task_gid, field_gid, option_gid],
+    )?;
+    Ok(())
+}
+
 pub fn upsert_custom_fields(
     conn: &Connection,
     task_gid: &str,
     fields: &[asanaclient::CustomFieldValue],
 ) -> Result<(), rusqlite::Error> {
     for cf in fields {
+        let has_enum = cf.enum_value.is_some();
+        let has_multi_enum = !cf.multi_enum_values.is_empty();
         let display_value = cf.display_value.as_deref().unwrap_or("");
-        if display_value.is_empty() && cf.text_value.is_none() && cf.number_value.is_none() {
+
+        // Skip fields that have no meaningful value at all
+        if display_value.is_empty()
+            && cf.text_value.is_none()
+            && cf.number_value.is_none()
+            && !has_enum
+            && !has_multi_enum
+        {
             continue;
         }
 
@@ -239,6 +293,23 @@ pub fn upsert_custom_fields(
                 display_value,
             ],
         )?;
+
+        // Upsert enum_value into dim_enum_options if present
+        if let Some(ref ev) = cf.enum_value {
+            upsert_enum_option(conn, &cf.gid, ev)?;
+        }
+
+        // Upsert multi_enum_values into dim_enum_options + bridge table
+        if has_multi_enum {
+            for option in &cf.multi_enum_values {
+                upsert_enum_option(conn, &cf.gid, option)?;
+            }
+            // Clear stale bridge rows for this task+field, then insert current ones
+            delete_task_multi_enum_values(conn, task_gid, &cf.gid)?;
+            for option in &cf.multi_enum_values {
+                upsert_task_multi_enum_value(conn, task_gid, &cf.gid, &option.gid)?;
+            }
+        }
     }
     Ok(())
 }

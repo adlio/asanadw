@@ -11,7 +11,7 @@ pub async fn search_workspace_tasks(
     assignee_gid: Option<&str>,
 ) -> Result<Vec<asanaclient::Task>> {
     let mut query = vec![
-        ("opt_fields", "gid,name,completed,completed_at,assignee,assignee.name,due_on,due_at,start_on,created_at,modified_at,notes,html_notes,parent,num_subtasks,num_likes,memberships,memberships.project,memberships.project.name,memberships.section,memberships.section.name,tags,tags.name,custom_fields,custom_fields.gid,custom_fields.name,custom_fields.display_value,custom_fields.resource_subtype,custom_fields.text_value,custom_fields.number_value,custom_fields.enum_value,custom_fields.enum_value.gid,custom_fields.date_value,custom_fields.date_value.date,custom_fields.date_value.date_time,permalink_url"),
+        ("opt_fields", "gid,name,completed,completed_at,assignee,assignee.name,due_on,due_at,start_on,created_at,modified_at,notes,html_notes,parent,num_subtasks,num_likes,memberships,memberships.project,memberships.project.name,memberships.section,memberships.section.name,tags,tags.name,custom_fields,custom_fields.gid,custom_fields.name,custom_fields.display_value,custom_fields.resource_subtype,custom_fields.text_value,custom_fields.number_value,custom_fields.enum_value,custom_fields.enum_value.gid,custom_fields.enum_value.name,custom_fields.enum_value.color,custom_fields.enum_value.enabled,custom_fields.multi_enum_values,custom_fields.multi_enum_values.gid,custom_fields.multi_enum_values.name,custom_fields.multi_enum_values.color,custom_fields.multi_enum_values.enabled,custom_fields.date_value,custom_fields.date_value.date,custom_fields.date_value.date_time,permalink_url"),
     ];
 
     if let Some(since) = modified_since {

@@ -66,6 +66,7 @@ impl Database {
                 Migrations::new(vec![
                     M::up(include_str!("migrations/001_initial.sql")),
                     M::up(include_str!("migrations/002_add_permalink_urls.sql")),
+                    M::up(include_str!("migrations/003_add_enum_options.sql")),
                 ]);
             migrations
                 .to_latest(conn)
@@ -139,6 +140,8 @@ mod tests {
         assert!(tables.contains(&"dim_period".to_string()));
         assert!(tables.contains(&"app_config".to_string()));
         assert!(tables.contains(&"sync_jobs".to_string()));
+        assert!(tables.contains(&"dim_enum_options".to_string()));
+        assert!(tables.contains(&"bridge_task_multi_enum_values".to_string()));
     }
 
     #[tokio::test]
