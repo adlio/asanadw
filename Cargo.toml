@@ -15,8 +15,8 @@ name = "asanadw"
 path = "src/bin/asanadw.rs"
 
 [dependencies]
-asanaclient = { path = "../asanaclient" }
-mixtape-core = { path = "../mixtape/mixtape-core", features = ["anthropic", "bedrock"] }
+asanaclient = "0.1"
+mixtape-core = { version = "0.2", features = ["anthropic", "bedrock"] }
 tokio-rusqlite = { version = "0.7", features = ["bundled"] }
 rusqlite = "0.37"
 rusqlite_migration = "2.3"
