@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/adlio/asanadw"
+documentation = "https://docs.rs/asanadw"
 description = "Sync Asana data to a local SQLite data warehouse"
 readme = "README.md"
 keywords = ["asana", "data-warehouse", "sqlite", "sync", "metrics"]
