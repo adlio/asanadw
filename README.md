@@ -1,5 +1,7 @@
 # asanadw
 
+[![Crates.io](https://img.shields.io/crates/v/asanadw.svg)](https://crates.io/crates/asanadw)
+[![docs.rs](https://img.shields.io/docsrs/asanadw)](https://docs.rs/asanadw)
 [![CI](https://github.com/adlio/asanadw/actions/workflows/ci.yml/badge.svg)](https://github.com/adlio/asanadw/actions/workflows/ci.yml)
 [![Coverage](https://codecov.io/gh/adlio/asanadw/branch/main/graph/badge.svg)](https://codecov.io/gh/adlio/asanadw)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -9,7 +11,7 @@ Sync Asana data to a local SQLite data warehouse for offline queries, metrics, a
 ## Quick start
 
 ```sh
-cargo install --path .
+cargo install asanadw
 export ASANA_TOKEN="your-asana-personal-access-token"
 asanadw monitor add-favorites
 asanadw sync all
@@ -289,3 +291,17 @@ Full-text search is powered by FTS5 virtual tables (`tasks_fts`, `comments_fts`,
 | `ASANA_TOKEN` | Yes | Asana personal access token |
 | `ANTHROPIC_API_KEY` | For `summarize` with `anthropic` provider | Anthropic API key |
 | `AWS_*` | For `summarize` with `bedrock` provider (default) | Standard AWS credentials (e.g. `AWS_PROFILE`, `AWS_REGION`) |
+
+## Development
+
+```bash
+make ci             # Run all checks (fmt, lint, build, docs, test)
+make test           # Run tests
+make coverage-html  # Coverage report in browser
+make fmt            # Format code
+make lint           # Run clippy
+```
+
+## License
+
+MIT
