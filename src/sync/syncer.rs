@@ -32,7 +32,7 @@ pub async fn sync_project(
     if !options.full {
         match sync_project_incremental(db, client, project_gid, options, progress).await {
             Ok(Some(report)) => return Ok(report), // Incremental succeeded
-            Ok(None) => {}                          // No token or expired, fall through
+            Ok(None) => {}                         // No token or expired, fall through
             Err(e) => log::warn!("Incremental sync failed, falling back to full: {e}"),
         }
     }
@@ -365,12 +365,7 @@ async fn sync_project_full(
             let range_start = since.format("%Y-%m-%d").to_string();
             let range_end = today.format("%Y-%m-%d").to_string();
             move |conn| {
-                repository::insert_sync_job(
-                    conn,
-                    &entity_key,
-                    Some(&range_start),
-                    Some(&range_end),
-                )
+                repository::insert_sync_job(conn, &entity_key, Some(&range_start), Some(&range_end))
             }
         })
         .await?;
@@ -442,7 +437,11 @@ async fn sync_project_full(
                 for (_task_gid, comments) in &task_comments {
                     for comment in comments {
                         if let Some(ref author) = comment.created_by {
-                            repository::upsert_user_minimal(conn, &author.gid, author.name.as_deref())?;
+                            repository::upsert_user_minimal(
+                                conn,
+                                &author.gid,
+                                author.name.as_deref(),
+                            )?;
                         }
                     }
                 }
@@ -488,7 +487,14 @@ async fn sync_project_full(
             let entity_key = entity_key.clone();
             move |conn| {
                 repository::update_sync_job(
-                    conn, job_id, &status_str, total_synced, 0, 1, 1, None,
+                    conn,
+                    job_id,
+                    &status_str,
+                    total_synced,
+                    0,
+                    1,
+                    1,
+                    None,
                 )?;
                 repository::update_monitored_entity_sync_time(conn, &entity_key)?;
                 Ok::<(), rusqlite::Error>(())
@@ -502,9 +508,7 @@ async fn sync_project_full(
             db.writer()
                 .call({
                     let entity_key = entity_key.clone();
-                    move |conn| {
-                        repository::set_event_sync_token(conn, &entity_key, &new_token)
-                    }
+                    move |conn| repository::set_event_sync_token(conn, &entity_key, &new_token)
                 })
                 .await?;
         }
@@ -545,9 +549,7 @@ pub async fn sync_user(
             let entity_key = entity_key.clone();
             let start = since.format("%Y-%m-%d").to_string();
             let end = today.format("%Y-%m-%d").to_string();
-            move |conn| {
-                repository::insert_sync_job(conn, &entity_key, Some(&start), Some(&end))
-            }
+            move |conn| repository::insert_sync_job(conn, &entity_key, Some(&start), Some(&end))
         })
         .await?;
 

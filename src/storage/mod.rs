@@ -62,16 +62,13 @@ impl Database {
                  PRAGMA busy_timeout=5000;",
             )
             .map_err(|e| e.to_string())?;
-            let migrations =
-                Migrations::new(vec![
-                    M::up(include_str!("migrations/001_initial.sql")),
-                    M::up(include_str!("migrations/002_add_permalink_urls.sql")),
-                    M::up(include_str!("migrations/003_add_enum_options.sql")),
-                    M::up(include_str!("migrations/004_add_event_sync_tokens.sql")),
-                ]);
-            migrations
-                .to_latest(conn)
-                .map_err(|e| e.to_string())?;
+            let migrations = Migrations::new(vec![
+                M::up(include_str!("migrations/001_initial.sql")),
+                M::up(include_str!("migrations/002_add_permalink_urls.sql")),
+                M::up(include_str!("migrations/003_add_enum_options.sql")),
+                M::up(include_str!("migrations/004_add_event_sync_tokens.sql")),
+            ]);
+            migrations.to_latest(conn).map_err(|e| e.to_string())?;
             Ok::<(), String>(())
         })
         .await
@@ -125,9 +122,8 @@ mod tests {
         let tables: Vec<String> = db
             .reader()
             .call(|conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
-                )?;
+                let mut stmt = conn
+                    .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")?;
                 let rows = stmt.query_map([], |row| row.get(0))?;
                 Ok::<Vec<String>, rusqlite::Error>(rows.filter_map(|r| r.ok()).collect())
             })
@@ -151,11 +147,7 @@ mod tests {
 
         let count: i64 = db
             .reader()
-            .call(|conn| {
-                Ok::<i64, rusqlite::Error>(
-                    conn.query_row("SELECT COUNT(*) FROM dim_date", [], |row| row.get(0))?,
-                )
-            })
+            .call(|conn| conn.query_row("SELECT COUNT(*) FROM dim_date", [], |row| row.get(0)))
             .await
             .unwrap();
 
@@ -168,11 +160,7 @@ mod tests {
 
         let count: i64 = db
             .reader()
-            .call(|conn| {
-                Ok::<i64, rusqlite::Error>(
-                    conn.query_row("SELECT COUNT(*) FROM dim_period", [], |row| row.get(0))?,
-                )
-            })
+            .call(|conn| conn.query_row("SELECT COUNT(*) FROM dim_period", [], |row| row.get(0)))
             .await
             .unwrap();
 

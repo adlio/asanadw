@@ -91,11 +91,17 @@ Respond with ONLY a JSON object (no markdown, no code fences):
 }}"#
     );
 
-    let response = agent.run(&prompt).await.map_err(|e| Error::Llm(e.to_string()))?;
+    let response = agent
+        .run(&prompt)
+        .await
+        .map_err(|e| Error::Llm(e.to_string()))?;
     let text = response.text().trim();
     let json_str = strip_code_fences(text);
-    let summary: UserPeriodSummary = serde_json::from_str(json_str)
-        .map_err(|e| Error::Llm(format!("Failed to parse LLM response: {e}\nResponse: {text}")))?;
+    let summary: UserPeriodSummary = serde_json::from_str(json_str).map_err(|e| {
+        Error::Llm(format!(
+            "Failed to parse LLM response: {e}\nResponse: {text}"
+        ))
+    })?;
 
     store_user_summary(db, user_gid, &period_key, &summary).await?;
     Ok(summary)
@@ -145,11 +151,17 @@ Respond with ONLY a JSON object (no markdown, no code fences):
 }}"#
     );
 
-    let response = agent.run(&prompt).await.map_err(|e| Error::Llm(e.to_string()))?;
+    let response = agent
+        .run(&prompt)
+        .await
+        .map_err(|e| Error::Llm(e.to_string()))?;
     let text = response.text().trim();
     let json_str = strip_code_fences(text);
-    let summary: ProjectPeriodSummary = serde_json::from_str(json_str)
-        .map_err(|e| Error::Llm(format!("Failed to parse LLM response: {e}\nResponse: {text}")))?;
+    let summary: ProjectPeriodSummary = serde_json::from_str(json_str).map_err(|e| {
+        Error::Llm(format!(
+            "Failed to parse LLM response: {e}\nResponse: {text}"
+        ))
+    })?;
 
     store_project_summary(db, project_gid, &period_key, &summary).await?;
     Ok(summary)
@@ -199,11 +211,17 @@ Respond with ONLY a JSON object (no markdown, no code fences):
 }}"#
     );
 
-    let response = agent.run(&prompt).await.map_err(|e| Error::Llm(e.to_string()))?;
+    let response = agent
+        .run(&prompt)
+        .await
+        .map_err(|e| Error::Llm(e.to_string()))?;
     let text = response.text().trim();
     let json_str = strip_code_fences(text);
-    let summary: PortfolioPeriodSummary = serde_json::from_str(json_str)
-        .map_err(|e| Error::Llm(format!("Failed to parse LLM response: {e}\nResponse: {text}")))?;
+    let summary: PortfolioPeriodSummary = serde_json::from_str(json_str).map_err(|e| {
+        Error::Llm(format!(
+            "Failed to parse LLM response: {e}\nResponse: {text}"
+        ))
+    })?;
 
     store_portfolio_summary(db, portfolio_gid, &period_key, &summary).await?;
     Ok(summary)
@@ -253,11 +271,17 @@ Respond with ONLY a JSON object (no markdown, no code fences):
 }}"#
     );
 
-    let response = agent.run(&prompt).await.map_err(|e| Error::Llm(e.to_string()))?;
+    let response = agent
+        .run(&prompt)
+        .await
+        .map_err(|e| Error::Llm(e.to_string()))?;
     let text = response.text().trim();
     let json_str = strip_code_fences(text);
-    let summary: TeamPeriodSummary = serde_json::from_str(json_str)
-        .map_err(|e| Error::Llm(format!("Failed to parse LLM response: {e}\nResponse: {text}")))?;
+    let summary: TeamPeriodSummary = serde_json::from_str(json_str).map_err(|e| {
+        Error::Llm(format!(
+            "Failed to parse LLM response: {e}\nResponse: {text}"
+        ))
+    })?;
 
     store_team_summary(db, team_gid, &period_key, &summary).await?;
     Ok(summary)
@@ -280,19 +304,28 @@ async fn gather_user_period_context(
 
             // User name
             let name: Option<String> = conn
-                .query_row("SELECT name FROM dim_users WHERE user_gid = ?1", [&user_gid], |row| row.get(0))
+                .query_row(
+                    "SELECT name FROM dim_users WHERE user_gid = ?1",
+                    [&user_gid],
+                    |row| row.get(0),
+                )
                 .ok();
-            parts.push(format!("User: {}", name.unwrap_or_else(|| user_gid.clone())));
+            parts.push(format!(
+                "User: {}",
+                name.unwrap_or_else(|| user_gid.clone())
+            ));
 
             // Tasks completed in period
             let mut stmt = conn.prepare(
                 "SELECT name, completed_at, days_to_complete FROM fact_tasks
                  WHERE assignee_gid = ?1 AND is_completed = 1
                    AND completed_date_key >= ?2 AND completed_date_key <= ?3
-                 ORDER BY completed_at DESC LIMIT 50"
+                 ORDER BY completed_at DESC LIMIT 50",
             )?;
             let completed: Vec<(String, Option<String>, Option<i32>)> = stmt
-                .query_map(rusqlite::params![user_gid, start, end], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .query_map(rusqlite::params![user_gid, start, end], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?
                 .filter_map(|r| r.ok())
                 .collect();
             if !completed.is_empty() {
@@ -307,10 +340,12 @@ async fn gather_user_period_context(
             let mut stmt = conn.prepare(
                 "SELECT name, due_on FROM fact_tasks
                  WHERE assignee_gid = ?1 AND created_date_key >= ?2 AND created_date_key <= ?3
-                 ORDER BY created_at DESC LIMIT 30"
+                 ORDER BY created_at DESC LIMIT 30",
             )?;
             let created: Vec<(String, Option<String>)> = stmt
-                .query_map(rusqlite::params![user_gid, start, end], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .query_map(rusqlite::params![user_gid, start, end], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?
                 .filter_map(|r| r.ok())
                 .collect();
             if !created.is_empty() {
@@ -341,9 +376,16 @@ async fn gather_project_period_context(
             let mut parts = Vec::new();
 
             let name: Option<String> = conn
-                .query_row("SELECT name FROM dim_projects WHERE project_gid = ?1", [&project_gid], |row| row.get(0))
+                .query_row(
+                    "SELECT name FROM dim_projects WHERE project_gid = ?1",
+                    [&project_gid],
+                    |row| row.get(0),
+                )
                 .ok();
-            parts.push(format!("Project: {}", name.unwrap_or_else(|| project_gid.clone())));
+            parts.push(format!(
+                "Project: {}",
+                name.unwrap_or_else(|| project_gid.clone())
+            ));
 
             // Completed tasks
             let mut stmt = conn.prepare(
@@ -352,17 +394,22 @@ async fn gather_project_period_context(
                  LEFT JOIN dim_users u ON u.user_gid = t.assignee_gid
                  WHERE btp.project_gid = ?1 AND t.is_completed = 1
                    AND t.completed_date_key >= ?2 AND t.completed_date_key <= ?3
-                 ORDER BY t.completed_at DESC LIMIT 50"
+                 ORDER BY t.completed_at DESC LIMIT 50",
             )?;
             let completed: Vec<(String, Option<String>, Option<String>)> = stmt
-                .query_map(rusqlite::params![project_gid, start, end], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .query_map(rusqlite::params![project_gid, start, end], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?
                 .filter_map(|r| r.ok())
                 .collect();
             if !completed.is_empty() {
                 parts.push(format!("\nCompleted tasks ({}):", completed.len()));
                 for (name, assignee, at) in &completed {
                     let a = assignee.as_deref().unwrap_or("unassigned");
-                    parts.push(format!("  - {name} ({a}) [{}]", at.as_deref().unwrap_or("?")));
+                    parts.push(format!(
+                        "  - {name} ({a}) [{}]",
+                        at.as_deref().unwrap_or("?")
+                    ));
                 }
             }
 
@@ -372,10 +419,12 @@ async fn gather_project_period_context(
                  JOIN bridge_task_projects btp ON btp.task_gid = t.task_gid
                  LEFT JOIN dim_users u ON u.user_gid = t.assignee_gid
                  WHERE btp.project_gid = ?1 AND t.is_completed = 0
-                 ORDER BY t.due_on ASC LIMIT 30"
+                 ORDER BY t.due_on ASC LIMIT 30",
             )?;
             let open: Vec<(String, Option<String>, Option<String>, i32)> = stmt
-                .query_map([&project_gid], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+                .query_map([&project_gid], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?
                 .filter_map(|r| r.ok())
                 .collect();
             if !open.is_empty() {
@@ -485,7 +534,11 @@ async fn gather_team_period_context(
 
 // ── Cache operations ───────────────────────────────────────────
 
-async fn get_cached_user_summary(db: &Database, user_gid: &str, period_key: &str) -> Result<Option<UserPeriodSummary>> {
+async fn get_cached_user_summary(
+    db: &Database,
+    user_gid: &str,
+    period_key: &str,
+) -> Result<Option<UserPeriodSummary>> {
     let user_gid = user_gid.to_string();
     let period_key = period_key.to_string();
     db.reader()
@@ -513,13 +566,19 @@ async fn get_cached_user_summary(db: &Database, user_gid: &str, period_key: &str
         .map_err(|e| Error::Database(e.to_string()))
 }
 
-async fn store_user_summary(db: &Database, user_gid: &str, period_key: &str, summary: &UserPeriodSummary) -> Result<()> {
+async fn store_user_summary(
+    db: &Database,
+    user_gid: &str,
+    period_key: &str,
+    summary: &UserPeriodSummary,
+) -> Result<()> {
     let user_gid = user_gid.to_string();
     let period_key = period_key.to_string();
     let headline = summary.headline.clone();
     let what_changed = summary.what_changed.clone();
     let why_it_matters = summary.why_it_matters.clone();
-    let key_accomplishments = serde_json::to_string(&summary.key_accomplishments).unwrap_or_default();
+    let key_accomplishments =
+        serde_json::to_string(&summary.key_accomplishments).unwrap_or_default();
     let collaboration_notes = summary.collaboration_notes.clone();
 
     db.writer()
@@ -536,7 +595,11 @@ async fn store_user_summary(db: &Database, user_gid: &str, period_key: &str, sum
         .map_err(|e| Error::Database(e.to_string()))
 }
 
-async fn get_cached_project_summary(db: &Database, project_gid: &str, period_key: &str) -> Result<Option<ProjectPeriodSummary>> {
+async fn get_cached_project_summary(
+    db: &Database,
+    project_gid: &str,
+    period_key: &str,
+) -> Result<Option<ProjectPeriodSummary>> {
     let project_gid = project_gid.to_string();
     let period_key = period_key.to_string();
     db.reader()
@@ -564,7 +627,12 @@ async fn get_cached_project_summary(db: &Database, project_gid: &str, period_key
         .map_err(|e| Error::Database(e.to_string()))
 }
 
-async fn store_project_summary(db: &Database, project_gid: &str, period_key: &str, summary: &ProjectPeriodSummary) -> Result<()> {
+async fn store_project_summary(
+    db: &Database,
+    project_gid: &str,
+    period_key: &str,
+    summary: &ProjectPeriodSummary,
+) -> Result<()> {
     let project_gid = project_gid.to_string();
     let period_key = period_key.to_string();
     let headline = summary.headline.clone();
@@ -587,7 +655,11 @@ async fn store_project_summary(db: &Database, project_gid: &str, period_key: &st
         .map_err(|e| Error::Database(e.to_string()))
 }
 
-async fn get_cached_portfolio_summary(db: &Database, portfolio_gid: &str, period_key: &str) -> Result<Option<PortfolioPeriodSummary>> {
+async fn get_cached_portfolio_summary(
+    db: &Database,
+    portfolio_gid: &str,
+    period_key: &str,
+) -> Result<Option<PortfolioPeriodSummary>> {
     let portfolio_gid = portfolio_gid.to_string();
     let period_key = period_key.to_string();
     db.reader()
@@ -615,7 +687,12 @@ async fn get_cached_portfolio_summary(db: &Database, portfolio_gid: &str, period
         .map_err(|e| Error::Database(e.to_string()))
 }
 
-async fn store_portfolio_summary(db: &Database, portfolio_gid: &str, period_key: &str, summary: &PortfolioPeriodSummary) -> Result<()> {
+async fn store_portfolio_summary(
+    db: &Database,
+    portfolio_gid: &str,
+    period_key: &str,
+    summary: &PortfolioPeriodSummary,
+) -> Result<()> {
     let portfolio_gid = portfolio_gid.to_string();
     let period_key = period_key.to_string();
     let headline = summary.headline.clone();
@@ -638,7 +715,11 @@ async fn store_portfolio_summary(db: &Database, portfolio_gid: &str, period_key:
         .map_err(|e| Error::Database(e.to_string()))
 }
 
-async fn get_cached_team_summary(db: &Database, team_gid: &str, period_key: &str) -> Result<Option<TeamPeriodSummary>> {
+async fn get_cached_team_summary(
+    db: &Database,
+    team_gid: &str,
+    period_key: &str,
+) -> Result<Option<TeamPeriodSummary>> {
     let team_gid = team_gid.to_string();
     let period_key = period_key.to_string();
     db.reader()
@@ -666,13 +747,19 @@ async fn get_cached_team_summary(db: &Database, team_gid: &str, period_key: &str
         .map_err(|e| Error::Database(e.to_string()))
 }
 
-async fn store_team_summary(db: &Database, team_gid: &str, period_key: &str, summary: &TeamPeriodSummary) -> Result<()> {
+async fn store_team_summary(
+    db: &Database,
+    team_gid: &str,
+    period_key: &str,
+    summary: &TeamPeriodSummary,
+) -> Result<()> {
     let team_gid = team_gid.to_string();
     let period_key = period_key.to_string();
     let headline = summary.headline.clone();
     let what_changed = summary.what_changed.clone();
     let why_it_matters = summary.why_it_matters.clone();
-    let key_accomplishments = serde_json::to_string(&summary.key_accomplishments).unwrap_or_default();
+    let key_accomplishments =
+        serde_json::to_string(&summary.key_accomplishments).unwrap_or_default();
     let health_assessment = summary.health_assessment.clone();
 
     db.writer()
@@ -688,4 +775,3 @@ async fn store_team_summary(db: &Database, team_gid: &str, period_key: &str, sum
         .await
         .map_err(|e| Error::Database(e.to_string()))
 }
-

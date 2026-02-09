@@ -197,8 +197,7 @@ impl QueryBuilder {
     /// Build and execute the query, returning results as JSON.
     pub async fn to_json(self, db: &Database) -> Result<String> {
         let rows = self.tasks(db).await?;
-        serde_json::to_string_pretty(&rows)
-            .map_err(|e| crate::error::Error::Other(e.to_string()))
+        serde_json::to_string_pretty(&rows).map_err(|e| crate::error::Error::Other(e.to_string()))
     }
 
     /// Build and execute the query, returning results as CSV.
@@ -221,7 +220,8 @@ impl QueryBuilder {
                 csv_escape(row.project_name.as_deref().unwrap_or("")),
                 csv_escape(row.section_name.as_deref().unwrap_or("")),
                 row.is_overdue,
-                row.days_to_complete.map_or(String::new(), |d| d.to_string()),
+                row.days_to_complete
+                    .map_or(String::new(), |d| d.to_string()),
                 row.num_subtasks,
                 row.num_likes,
                 csv_escape(row.permalink_url.as_deref().unwrap_or("")),

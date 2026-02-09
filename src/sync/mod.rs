@@ -37,7 +37,10 @@ impl SyncOptions {
     pub fn since_date(&self) -> Option<NaiveDate> {
         if let Some(d) = self.since {
             Some(d)
-        } else { self.days.map(|days| chrono::Local::now().date_naive() - chrono::Duration::days(days as i64)) }
+        } else {
+            self.days
+                .map(|days| chrono::Local::now().date_naive() - chrono::Duration::days(days as i64))
+        }
     }
 }
 

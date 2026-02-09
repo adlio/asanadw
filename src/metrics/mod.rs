@@ -28,9 +28,12 @@ pub async fn compute_user_metrics(
                 )
                 .ok();
 
-            let throughput = compute_throughput_sql(conn, Some(&user_gid), None, &start_str, &end_str)?;
-            let lead_time = compute_lead_time_sql(conn, Some(&user_gid), None, &start_str, &end_str)?;
-            let collaboration = compute_collaboration_sql(conn, Some(&user_gid), None, &start_str, &end_str)?;
+            let throughput =
+                compute_throughput_sql(conn, Some(&user_gid), None, &start_str, &end_str)?;
+            let lead_time =
+                compute_lead_time_sql(conn, Some(&user_gid), None, &start_str, &end_str)?;
+            let collaboration =
+                compute_collaboration_sql(conn, Some(&user_gid), None, &start_str, &end_str)?;
 
             Ok::<UserMetrics, rusqlite::Error>(UserMetrics {
                 user_gid,
@@ -67,10 +70,13 @@ pub async fn compute_project_metrics(
                 )
                 .ok();
 
-            let throughput = compute_throughput_sql(conn, None, Some(&project_gid), &start_str, &end_str)?;
+            let throughput =
+                compute_throughput_sql(conn, None, Some(&project_gid), &start_str, &end_str)?;
             let health = compute_health_sql(conn, Some(&project_gid), &end_str)?;
-            let lead_time = compute_lead_time_sql(conn, None, Some(&project_gid), &start_str, &end_str)?;
-            let collaboration = compute_collaboration_sql(conn, None, Some(&project_gid), &start_str, &end_str)?;
+            let lead_time =
+                compute_lead_time_sql(conn, None, Some(&project_gid), &start_str, &end_str)?;
+            let collaboration =
+                compute_collaboration_sql(conn, None, Some(&project_gid), &start_str, &end_str)?;
 
             Ok::<ProjectMetrics, rusqlite::Error>(ProjectMetrics {
                 project_gid,
@@ -140,11 +146,16 @@ pub async fn compute_portfolio_metrics(
 
             if health.total_open > 0 {
                 health.overdue_pct = health.overdue_count as f64 / health.total_open as f64 * 100.0;
-                health.unassigned_pct = health.unassigned_count as f64 / health.total_open as f64 * 100.0;
+                health.unassigned_pct =
+                    health.unassigned_count as f64 / health.total_open as f64 * 100.0;
             }
 
             // Aggregate unique commenters across portfolio
-            let placeholders = project_gids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let placeholders = project_gids
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(",");
             if !project_gids.is_empty() {
                 let sql = format!(
                     "SELECT COUNT(DISTINCT c.author_gid)
@@ -207,9 +218,8 @@ pub async fn compute_team_metrics(
                 .ok();
 
             // Get member GIDs
-            let mut stmt = conn.prepare(
-                "SELECT user_gid FROM bridge_team_members WHERE team_gid = ?1"
-            )?;
+            let mut stmt =
+                conn.prepare("SELECT user_gid FROM bridge_team_members WHERE team_gid = ?1")?;
             let member_gids: Vec<String> = stmt
                 .query_map([&team_gid], |row| row.get(0))?
                 .filter_map(|r| r.ok())
@@ -237,7 +247,11 @@ pub async fn compute_team_metrics(
 
             // Health across team's tasks (all open assigned to team members)
             if !member_gids.is_empty() {
-                let placeholders = member_gids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let placeholders = member_gids
+                    .iter()
+                    .map(|_| "?")
+                    .collect::<Vec<_>>()
+                    .join(",");
                 let sql = format!(
                     "SELECT
                         SUM(CASE WHEN is_overdue = 1 THEN 1 ELSE 0 END),
@@ -260,8 +274,10 @@ pub async fn compute_team_metrics(
                     health.total_open = row.get::<_, i64>(3)? as u64;
                 }
                 if health.total_open > 0 {
-                    health.overdue_pct = health.overdue_count as f64 / health.total_open as f64 * 100.0;
-                    health.unassigned_pct = health.unassigned_count as f64 / health.total_open as f64 * 100.0;
+                    health.overdue_pct =
+                        health.overdue_count as f64 / health.total_open as f64 * 100.0;
+                    health.unassigned_pct =
+                        health.unassigned_count as f64 / health.total_open as f64 * 100.0;
                 }
 
                 // Unique commenters across team
@@ -311,8 +327,11 @@ fn compute_throughput_sql(
     end: &str,
 ) -> std::result::Result<ThroughputMetrics, rusqlite::Error> {
     #[allow(clippy::type_complexity)]
-    let (where_clause, join_clause, bind_fn): (String, String, Box<dyn Fn(&mut rusqlite::Statement, usize) -> rusqlite::Result<()> + '_>) =
-        build_entity_filter(user_gid, project_gid);
+    let (where_clause, join_clause, bind_fn): (
+        String,
+        String,
+        Box<dyn Fn(&mut rusqlite::Statement, usize) -> rusqlite::Result<()> + '_>,
+    ) = build_entity_filter(user_gid, project_gid);
 
     // Tasks created in period
     let sql = format!(
@@ -382,8 +401,16 @@ fn compute_health_sql(
         unassigned_count: unassigned,
         stale_count: stale,
         total_open,
-        overdue_pct: if total_open > 0 { overdue as f64 / total_open as f64 * 100.0 } else { 0.0 },
-        unassigned_pct: if total_open > 0 { unassigned as f64 / total_open as f64 * 100.0 } else { 0.0 },
+        overdue_pct: if total_open > 0 {
+            overdue as f64 / total_open as f64 * 100.0
+        } else {
+            0.0
+        },
+        unassigned_pct: if total_open > 0 {
+            unassigned as f64 / total_open as f64 * 100.0
+        } else {
+            0.0
+        },
     })
 }
 
@@ -395,8 +422,11 @@ fn compute_lead_time_raw(
     end: &str,
 ) -> std::result::Result<Vec<i32>, rusqlite::Error> {
     #[allow(clippy::type_complexity)]
-    let (where_clause, join_clause, bind_fn): (String, String, Box<dyn Fn(&mut rusqlite::Statement, usize) -> rusqlite::Result<()> + '_>) =
-        build_entity_filter(user_gid, project_gid);
+    let (where_clause, join_clause, bind_fn): (
+        String,
+        String,
+        Box<dyn Fn(&mut rusqlite::Statement, usize) -> rusqlite::Result<()> + '_>,
+    ) = build_entity_filter(user_gid, project_gid);
 
     let sql = format!(
         "SELECT t.days_to_complete FROM fact_tasks t {join_clause}
@@ -436,21 +466,22 @@ fn compute_collaboration_sql(
     end: &str,
 ) -> std::result::Result<CollaborationMetrics, rusqlite::Error> {
     // Comments — use parameterized query for entity filter
-    let (task_join, task_where, entity_val): (&str, &str, Option<&str>) = if let Some(pgid) = project_gid {
-        (
-            "JOIN bridge_task_projects btp ON btp.task_gid = c.task_gid",
-            " AND btp.project_gid = ?3",
-            Some(pgid),
-        )
-    } else if let Some(uid) = user_gid {
-        (
-            "JOIN fact_tasks t ON t.task_gid = c.task_gid",
-            " AND t.assignee_gid = ?3",
-            Some(uid),
-        )
-    } else {
-        ("", "", None)
-    };
+    let (task_join, task_where, entity_val): (&str, &str, Option<&str>) =
+        if let Some(pgid) = project_gid {
+            (
+                "JOIN bridge_task_projects btp ON btp.task_gid = c.task_gid",
+                " AND btp.project_gid = ?3",
+                Some(pgid),
+            )
+        } else if let Some(uid) = user_gid {
+            (
+                "JOIN fact_tasks t ON t.task_gid = c.task_gid",
+                " AND t.assignee_gid = ?3",
+                Some(uid),
+            )
+        } else {
+            ("", "", None)
+        };
 
     let sql = format!(
         "SELECT COUNT(*), COUNT(DISTINCT c.author_gid)
@@ -473,17 +504,18 @@ fn compute_collaboration_sql(
     }
 
     // Likes
-    let (like_join, like_where, like_val): (&str, &str, Option<&str>) = if let Some(pgid) = project_gid {
-        (
-            "JOIN bridge_task_projects btp ON btp.task_gid = t.task_gid",
-            " AND btp.project_gid = ?3",
-            Some(pgid),
-        )
-    } else if let Some(uid) = user_gid {
-        ("", " AND t.assignee_gid = ?3", Some(uid))
-    } else {
-        ("", "", None)
-    };
+    let (like_join, like_where, like_val): (&str, &str, Option<&str>) =
+        if let Some(pgid) = project_gid {
+            (
+                "JOIN bridge_task_projects btp ON btp.task_gid = t.task_gid",
+                " AND btp.project_gid = ?3",
+                Some(pgid),
+            )
+        } else if let Some(uid) = user_gid {
+            ("", " AND t.assignee_gid = ?3", Some(uid))
+        } else {
+            ("", "", None)
+        };
 
     let sql = format!(
         "SELECT COALESCE(SUM(t.num_likes), 0) FROM fact_tasks t {like_join}
@@ -508,7 +540,11 @@ fn compute_collaboration_sql(
 fn build_entity_filter<'a>(
     user_gid: Option<&'a str>,
     project_gid: Option<&'a str>,
-) -> (String, String, Box<dyn Fn(&mut rusqlite::Statement<'_>, usize) -> rusqlite::Result<()> + 'a>) {
+) -> (
+    String,
+    String,
+    Box<dyn Fn(&mut rusqlite::Statement<'_>, usize) -> rusqlite::Result<()> + 'a>,
+) {
     if let Some(pgid) = project_gid {
         (
             " AND btp.project_gid = ?3".to_string(),
@@ -540,9 +576,8 @@ fn get_portfolio_project_gids(
     conn: &rusqlite::Connection,
     portfolio_gid: &str,
 ) -> std::result::Result<Vec<String>, rusqlite::Error> {
-    let mut stmt = conn.prepare(
-        "SELECT project_gid FROM bridge_portfolio_projects WHERE portfolio_gid = ?1"
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT project_gid FROM bridge_portfolio_projects WHERE portfolio_gid = ?1")?;
     let gids: Vec<String> = stmt
         .query_map([portfolio_gid], |row| row.get(0))?
         .filter_map(|r| r.ok())

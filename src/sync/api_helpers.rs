@@ -27,10 +27,7 @@ pub async fn search_workspace_tasks(
 }
 
 /// Get sections for a project.
-pub async fn get_project_sections(
-    client: &Client,
-    project_gid: &str,
-) -> Result<Vec<SectionInfo>> {
+pub async fn get_project_sections(client: &Client, project_gid: &str) -> Result<Vec<SectionInfo>> {
     let path = format!("/projects/{project_gid}/sections");
     let query = [("opt_fields", "gid,name")];
     let sections: Vec<SectionInfo> = client.get_all(&path, &query).await?;
@@ -44,10 +41,7 @@ pub struct SectionInfo {
 }
 
 /// Get members of a team.
-pub async fn get_team_members(
-    client: &Client,
-    team_gid: &str,
-) -> Result<Vec<TeamMemberInfo>> {
+pub async fn get_team_members(client: &Client, team_gid: &str) -> Result<Vec<TeamMemberInfo>> {
     let path = format!("/teams/{team_gid}/users");
     let query = [("opt_fields", "gid,name,email")];
     let members: Vec<TeamMemberInfo> = client.get_all(&path, &query).await?;
@@ -62,10 +56,7 @@ pub struct TeamMemberInfo {
 }
 
 /// Get projects belonging to a team.
-pub async fn get_team_projects(
-    client: &Client,
-    team_gid: &str,
-) -> Result<Vec<ProjectRef>> {
+pub async fn get_team_projects(client: &Client, team_gid: &str) -> Result<Vec<ProjectRef>> {
     let path = format!("/teams/{team_gid}/projects");
     let query = [("opt_fields", "gid,name,archived")];
     let projects: Vec<ProjectRef> = client.get_all(&path, &query).await?;

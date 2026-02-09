@@ -9,9 +9,7 @@ pub mod sync;
 pub mod url;
 
 pub use error::{Error, Result};
-pub use metrics::{
-    PortfolioMetrics, ProjectMetrics, TeamMetrics, UserMetrics,
-};
+pub use metrics::{PortfolioMetrics, ProjectMetrics, TeamMetrics, UserMetrics};
 pub use query::builder::QueryBuilder;
 pub use query::period::Period;
 pub use search::{SearchHit, SearchHitType, SearchOptions, SearchResults};
@@ -48,9 +46,7 @@ impl AsanaDW {
         let cached: Option<String> = self
             .db
             .reader()
-            .call(|conn| {
-                repository::get_config(conn, "workspace_gid")
-            })
+            .call(|conn| repository::get_config(conn, "workspace_gid"))
             .await?;
 
         if let Some(gid) = cached {
@@ -126,12 +122,15 @@ impl AsanaDW {
                     if let Some(ref email) = email {
                         repository::set_config(conn, "user_email", email)?;
                     }
-                    repository::upsert_user(conn, &asanaclient::User {
-                        gid: gid.clone(),
-                        name,
-                        email,
-                        photo: None,
-                    })?;
+                    repository::upsert_user(
+                        conn,
+                        &asanaclient::User {
+                            gid: gid.clone(),
+                            name,
+                            email,
+                            photo: None,
+                        },
+                    )?;
                     Ok::<(), rusqlite::Error>(())
                 }
             })
@@ -169,7 +168,15 @@ impl AsanaDW {
     ) -> Result<SyncReport> {
         let workspace_gid = self.workspace_gid().await?;
         let gid = url::resolve_gid(identifier)?;
-        syncer::sync_user(&self.db, &self.client, &workspace_gid, &gid, options, progress).await
+        syncer::sync_user(
+            &self.db,
+            &self.client,
+            &workspace_gid,
+            &gid,
+            options,
+            progress,
+        )
+        .await
     }
 
     pub async fn sync_team(
@@ -180,7 +187,15 @@ impl AsanaDW {
     ) -> Result<SyncReport> {
         let workspace_gid = self.workspace_gid().await?;
         let gid = url::resolve_gid(identifier)?;
-        syncer::sync_team(&self.db, &self.client, &workspace_gid, &gid, options, progress).await
+        syncer::sync_team(
+            &self.db,
+            &self.client,
+            &workspace_gid,
+            &gid,
+            options,
+            progress,
+        )
+        .await
     }
 
     pub async fn sync_portfolio(
@@ -206,9 +221,7 @@ impl AsanaDW {
         let entities: Vec<repository::MonitoredEntity> = self
             .db
             .reader()
-            .call(|conn| {
-                repository::list_monitored_entities(conn)
-            })
+            .call(|conn| repository::list_monitored_entities(conn))
             .await?;
 
         let total = entities.len();
@@ -218,21 +231,48 @@ impl AsanaDW {
 
             let result = match entity.entity_type.as_str() {
                 "project" => {
-                    syncer::sync_project(&self.db, &self.client, &entity.entity_gid, options, progress).await
+                    syncer::sync_project(
+                        &self.db,
+                        &self.client,
+                        &entity.entity_gid,
+                        options,
+                        progress,
+                    )
+                    .await
                 }
                 "user" => {
                     let ws = self.workspace_gid().await?;
-                    syncer::sync_user(&self.db, &self.client, &ws, &entity.entity_gid, options, progress)
-                        .await
+                    syncer::sync_user(
+                        &self.db,
+                        &self.client,
+                        &ws,
+                        &entity.entity_gid,
+                        options,
+                        progress,
+                    )
+                    .await
                 }
                 "team" => {
                     let ws = self.workspace_gid().await?;
-                    syncer::sync_team(&self.db, &self.client, &ws, &entity.entity_gid, options, progress)
-                        .await
+                    syncer::sync_team(
+                        &self.db,
+                        &self.client,
+                        &ws,
+                        &entity.entity_gid,
+                        options,
+                        progress,
+                    )
+                    .await
                 }
                 "portfolio" => {
-                    syncer::sync_portfolio(&self.db, &self.client, &entity.entity_gid, options, progress)
-                        .await
+                    syncer::sync_portfolio(
+                        &self.db,
+                        &self.client,
+                        &entity.entity_gid,
+                        options,
+                        progress,
+                    )
+                    .await
                 }
                 other => {
                     log::warn!("Unknown entity type: {other}");
@@ -265,23 +305,13 @@ impl AsanaDW {
 
     // ── Monitor commands ───────────────────────────────────────────
 
-    pub async fn monitor_add(
-        &self,
-        entity_type: &str,
-        identifier: &str,
-    ) -> Result<String> {
+    pub async fn monitor_add(&self, entity_type: &str, identifier: &str) -> Result<String> {
         let gid = url::resolve_gid(identifier)?;
         let entity_key = format!("{entity_type}:{gid}");
 
         // Try to get a display name
         let display_name = match entity_type {
-            "project" => self
-                .client
-                .projects()
-                .get(&gid)
-                .await
-                .map(|p| p.name)
-                .ok(),
+            "project" => self.client.projects().get(&gid).await.map(|p| p.name).ok(),
             "portfolio" => self
                 .client
                 .portfolios()
@@ -328,9 +358,7 @@ impl AsanaDW {
     pub async fn monitor_list(&self) -> Result<Vec<repository::MonitoredEntity>> {
         self.db
             .reader()
-            .call(|conn| {
-                repository::list_monitored_entities(conn)
-            })
+            .call(|conn| repository::list_monitored_entities(conn))
             .await
             .map_err(|e| Error::Database(e.to_string()))
     }

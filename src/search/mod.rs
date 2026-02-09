@@ -357,7 +357,10 @@ mod tests {
             project_gid: None,
         };
         let results = search(&db, "widget", &options).await.unwrap();
-        assert!(results.hits.iter().all(|h| h.hit_type == SearchHitType::Task));
+        assert!(results
+            .hits
+            .iter()
+            .all(|h| h.hit_type == SearchHitType::Task));
 
         // Search for "widget" filtered to projects only
         let options = SearchOptions {
@@ -367,6 +370,9 @@ mod tests {
             project_gid: None,
         };
         let results = search(&db, "widget", &options).await.unwrap();
-        assert!(results.hits.iter().all(|h| h.hit_type == SearchHitType::Project));
+        assert!(results
+            .hits
+            .iter()
+            .all(|h| h.hit_type == SearchHitType::Project));
     }
 }

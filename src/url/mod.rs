@@ -41,10 +41,7 @@ pub fn parse_asana_url(input: &str) -> Result<AsanaUrlInfo> {
         return Err(Error::UrlParse(format!("not an Asana URL: {input}")));
     }
 
-    let segments: Vec<&str> = url
-        .path_segments()
-        .map(|s| s.collect())
-        .unwrap_or_default();
+    let segments: Vec<&str> = url.path_segments().map(|s| s.collect()).unwrap_or_default();
 
     match segments.first().copied() {
         Some("0") => parse_legacy_url(input, &segments[1..]),
@@ -116,15 +113,7 @@ fn parse_legacy_url(input: &str, rest: &[&str]) -> Result<AsanaUrlInfo> {
 
     // /0/<project_gid>/list|board|timeline|calendar|...
     let view_suffixes = [
-        "list",
-        "board",
-        "timeline",
-        "calendar",
-        "overview",
-        "messages",
-        "files",
-        "progress",
-        "",
+        "list", "board", "timeline", "calendar", "overview", "messages", "files", "progress", "",
     ];
 
     if seg2.is_empty() || view_suffixes.contains(&seg2) {
@@ -232,8 +221,7 @@ mod tests {
 
     #[test]
     fn test_task_url() {
-        let info =
-            parse_asana_url("https://app.asana.com/0/1234567890/9876543210").unwrap();
+        let info = parse_asana_url("https://app.asana.com/0/1234567890/9876543210").unwrap();
         assert_eq!(
             info,
             AsanaUrlInfo::Task {
@@ -273,10 +261,8 @@ mod tests {
 
     #[test]
     fn test_new_format_task_url() {
-        let info = parse_asana_url(
-            "https://app.asana.com/1/1209759542559920/task/9876543210",
-        )
-        .unwrap();
+        let info =
+            parse_asana_url("https://app.asana.com/1/1209759542559920/task/9876543210").unwrap();
         assert_eq!(
             info,
             AsanaUrlInfo::Task {
@@ -307,10 +293,7 @@ mod tests {
     #[test]
     fn test_resolve_gid_email() {
         // Emails pass through as-is for later API resolution
-        assert_eq!(
-            resolve_gid("user@example.com").unwrap(),
-            "user@example.com"
-        );
+        assert_eq!(resolve_gid("user@example.com").unwrap(), "user@example.com");
     }
 
     #[test]

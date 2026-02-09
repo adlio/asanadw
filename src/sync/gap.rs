@@ -63,10 +63,7 @@ fn merge_ranges(ranges: &[(NaiveDate, NaiveDate)]) -> Vec<DateRange> {
 
     let mut sorted: Vec<DateRange> = ranges
         .iter()
-        .map(|(s, e)| DateRange {
-            start: *s,
-            end: *e,
-        })
+        .map(|(s, e)| DateRange { start: *s, end: *e })
         .collect();
     sorted.sort_by_key(|r| r.start);
 
@@ -116,9 +113,27 @@ mod tests {
         let gaps = find_gaps(d(2025, 1, 1), d(2025, 3, 31), &[]);
         // Should produce 3 month-aligned batches
         assert_eq!(gaps.len(), 3);
-        assert_eq!(gaps[0], DateRange { start: d(2025, 1, 1), end: d(2025, 1, 31) });
-        assert_eq!(gaps[1], DateRange { start: d(2025, 2, 1), end: d(2025, 2, 28) });
-        assert_eq!(gaps[2], DateRange { start: d(2025, 3, 1), end: d(2025, 3, 31) });
+        assert_eq!(
+            gaps[0],
+            DateRange {
+                start: d(2025, 1, 1),
+                end: d(2025, 1, 31)
+            }
+        );
+        assert_eq!(
+            gaps[1],
+            DateRange {
+                start: d(2025, 2, 1),
+                end: d(2025, 2, 28)
+            }
+        );
+        assert_eq!(
+            gaps[2],
+            DateRange {
+                start: d(2025, 3, 1),
+                end: d(2025, 3, 31)
+            }
+        );
     }
 
     #[test]
@@ -136,7 +151,13 @@ mod tests {
         ];
         let gaps = find_gaps(d(2025, 1, 1), d(2025, 3, 31), &synced);
         assert_eq!(gaps.len(), 1);
-        assert_eq!(gaps[0], DateRange { start: d(2025, 2, 1), end: d(2025, 2, 28) });
+        assert_eq!(
+            gaps[0],
+            DateRange {
+                start: d(2025, 2, 1),
+                end: d(2025, 2, 28)
+            }
+        );
     }
 
     #[test]
@@ -144,7 +165,13 @@ mod tests {
         let synced = vec![(d(2025, 1, 1), d(2025, 2, 28))];
         let gaps = find_gaps(d(2025, 1, 1), d(2025, 3, 31), &synced);
         assert_eq!(gaps.len(), 1);
-        assert_eq!(gaps[0], DateRange { start: d(2025, 3, 1), end: d(2025, 3, 31) });
+        assert_eq!(
+            gaps[0],
+            DateRange {
+                start: d(2025, 3, 1),
+                end: d(2025, 3, 31)
+            }
+        );
     }
 
     #[test]
@@ -155,7 +182,7 @@ mod tests {
         ];
         let gaps = find_gaps(d(2025, 1, 1), d(2025, 3, 31), &synced);
         // Gap should start at Feb 16 through Mar 31
-        assert!(gaps.len() >= 1);
+        assert!(!gaps.is_empty());
         assert_eq!(gaps[0].start, d(2025, 2, 16));
     }
 
@@ -163,8 +190,26 @@ mod tests {
     fn test_split_into_months() {
         let batches = split_into_months(d(2025, 1, 15), d(2025, 3, 10));
         assert_eq!(batches.len(), 3);
-        assert_eq!(batches[0], DateRange { start: d(2025, 1, 15), end: d(2025, 1, 31) });
-        assert_eq!(batches[1], DateRange { start: d(2025, 2, 1), end: d(2025, 2, 28) });
-        assert_eq!(batches[2], DateRange { start: d(2025, 3, 1), end: d(2025, 3, 10) });
+        assert_eq!(
+            batches[0],
+            DateRange {
+                start: d(2025, 1, 15),
+                end: d(2025, 1, 31)
+            }
+        );
+        assert_eq!(
+            batches[1],
+            DateRange {
+                start: d(2025, 2, 1),
+                end: d(2025, 2, 28)
+            }
+        );
+        assert_eq!(
+            batches[2],
+            DateRange {
+                start: d(2025, 3, 1),
+                end: d(2025, 3, 10)
+            }
+        );
     }
 }

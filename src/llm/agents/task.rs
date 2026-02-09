@@ -63,8 +63,11 @@ For change_types, use labels like: "feature", "bug", "design", "documentation", 
 
     // Parse JSON from response (strip markdown fences if present)
     let json_str = strip_code_fences(text);
-    let summary: TaskSummary =
-        serde_json::from_str(json_str).map_err(|e| Error::Llm(format!("Failed to parse LLM response: {e}\nResponse: {text}")))?;
+    let summary: TaskSummary = serde_json::from_str(json_str).map_err(|e| {
+        Error::Llm(format!(
+            "Failed to parse LLM response: {e}\nResponse: {text}"
+        ))
+    })?;
 
     // Cache the result
     store_summary(db, task_gid, &summary).await?;
@@ -246,4 +249,3 @@ fn truncate(s: &str, max: usize) -> &str {
         &s[..end]
     }
 }
-

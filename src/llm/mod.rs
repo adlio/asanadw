@@ -24,13 +24,11 @@ pub async fn create_agent(db: &Database) -> Result<mixtape_core::Agent> {
 async fn build_agent(provider: &str, model_name: &str) -> Result<mixtape_core::Agent> {
     // Each combination needs its own builder call since the model types are different.
     match (provider, model_name) {
-        ("bedrock", "claude-haiku-4-5" | "haiku") => {
-            mixtape_core::Agent::builder()
-                .bedrock(mixtape_core::ClaudeHaiku4_5)
-                .build()
-                .await
-                .map_err(|e| Error::Llm(e.to_string()))
-        }
+        ("bedrock", "claude-haiku-4-5" | "haiku") => mixtape_core::Agent::builder()
+            .bedrock(mixtape_core::ClaudeHaiku4_5)
+            .build()
+            .await
+            .map_err(|e| Error::Llm(e.to_string())),
         ("bedrock", _) => {
             // Default bedrock model
             mixtape_core::Agent::builder()
@@ -39,20 +37,16 @@ async fn build_agent(provider: &str, model_name: &str) -> Result<mixtape_core::A
                 .await
                 .map_err(|e| Error::Llm(e.to_string()))
         }
-        ("anthropic", "claude-haiku-4-5" | "haiku") => {
-            mixtape_core::Agent::builder()
-                .anthropic_from_env(mixtape_core::ClaudeHaiku4_5)
-                .build()
-                .await
-                .map_err(|e| Error::Llm(e.to_string()))
-        }
-        ("anthropic", _) => {
-            mixtape_core::Agent::builder()
-                .anthropic_from_env(mixtape_core::ClaudeSonnet4_5)
-                .build()
-                .await
-                .map_err(|e| Error::Llm(e.to_string()))
-        }
+        ("anthropic", "claude-haiku-4-5" | "haiku") => mixtape_core::Agent::builder()
+            .anthropic_from_env(mixtape_core::ClaudeHaiku4_5)
+            .build()
+            .await
+            .map_err(|e| Error::Llm(e.to_string())),
+        ("anthropic", _) => mixtape_core::Agent::builder()
+            .anthropic_from_env(mixtape_core::ClaudeSonnet4_5)
+            .build()
+            .await
+            .map_err(|e| Error::Llm(e.to_string())),
         (other, _) => Err(Error::Config(format!("unknown llm_provider: {other}"))),
     }
 }

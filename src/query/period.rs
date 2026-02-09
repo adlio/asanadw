@@ -180,8 +180,7 @@ impl Period {
                 last_day_of_month(*y, *m as u32),
             ),
             Period::Week(y, w) => {
-                let start =
-                    NaiveDate::from_isoywd_opt(*y, *w as u32, Weekday::Mon).unwrap();
+                let start = NaiveDate::from_isoywd_opt(*y, *w as u32, Weekday::Mon).unwrap();
                 (start, start + Duration::days(6))
             }
             Period::Rolling(n, as_of) => (*as_of - Duration::days(*n as i64 - 1), *as_of),
@@ -196,17 +195,13 @@ impl Period {
             }
             Period::QuarterToDate(y, q) => {
                 let start_month = (*q as u32 - 1) * 3 + 1;
-                (
-                    NaiveDate::from_ymd_opt(*y, start_month, 1).unwrap(),
-                    today,
-                )
+                (NaiveDate::from_ymd_opt(*y, start_month, 1).unwrap(), today)
             }
             Period::MonthToDate(y, m) => {
                 (NaiveDate::from_ymd_opt(*y, *m as u32, 1).unwrap(), today)
             }
             Period::WeekToDate(y, w) => {
-                let start =
-                    NaiveDate::from_isoywd_opt(*y, *w as u32, Weekday::Mon).unwrap();
+                let start = NaiveDate::from_isoywd_opt(*y, *w as u32, Weekday::Mon).unwrap();
                 (start, today)
             }
         }
@@ -245,9 +240,7 @@ impl Period {
                     Period::Week(*y, w - 1)
                 }
             }
-            Period::Rolling(n, as_of) => {
-                Period::Rolling(*n, *as_of - Duration::days(*n as i64))
-            }
+            Period::Rolling(n, as_of) => Period::Rolling(*n, *as_of - Duration::days(*n as i64)),
             Period::YearToDate(y) => Period::YearToDate(y - 1),
             Period::HalfToDate(y, h) => {
                 if *h == 1 {
@@ -290,11 +283,7 @@ impl Period {
         let prev = self.previous();
         let (prev_start, prev_end) = prev.date_range();
         let target = prev_start + Duration::days(offset);
-        let clamped = if target > prev_end {
-            prev_end
-        } else {
-            target
-        };
+        let clamped = if target > prev_end { prev_end } else { target };
 
         // Return as a Rolling period covering the prior period's equivalent range
         let days = (clamped - prev_start).num_days() + 1;
@@ -433,8 +422,14 @@ mod tests {
         assert_eq!(Period::Year(2025).previous(), Period::Year(2024));
         assert_eq!(Period::Half(2025, 1).previous(), Period::Half(2024, 2));
         assert_eq!(Period::Half(2025, 2).previous(), Period::Half(2025, 1));
-        assert_eq!(Period::Quarter(2025, 1).previous(), Period::Quarter(2024, 4));
-        assert_eq!(Period::Quarter(2025, 3).previous(), Period::Quarter(2025, 2));
+        assert_eq!(
+            Period::Quarter(2025, 1).previous(),
+            Period::Quarter(2024, 4)
+        );
+        assert_eq!(
+            Period::Quarter(2025, 3).previous(),
+            Period::Quarter(2025, 2)
+        );
         assert_eq!(Period::Month(2025, 1).previous(), Period::Month(2024, 12));
         assert_eq!(Period::Month(2025, 6).previous(), Period::Month(2025, 5));
     }

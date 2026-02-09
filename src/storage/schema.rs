@@ -20,15 +20,11 @@ pub fn ensure_dim_date(conn: &rusqlite::Connection) -> Result<(), rusqlite::Erro
         last_day_of_month(end_year, end_quarter_month)
     };
 
-    let existing: i64 =
-        conn.query_row("SELECT COUNT(*) FROM dim_date", [], |row| row.get(0))?;
+    let existing: i64 = conn.query_row("SELECT COUNT(*) FROM dim_date", [], |row| row.get(0))?;
     if existing > 0 {
         // Extend if needed: find max date and add new dates if end > max
-        let max_str: String = conn.query_row(
-            "SELECT MAX(date_key) FROM dim_date",
-            [],
-            |row| row.get(0),
-        )?;
+        let max_str: String =
+            conn.query_row("SELECT MAX(date_key) FROM dim_date", [], |row| row.get(0))?;
         let max_date = NaiveDate::parse_from_str(&max_str, "%Y-%m-%d").unwrap();
         if end <= max_date {
             return Ok(());
@@ -116,18 +112,16 @@ fn insert_date_range(
 
 /// Populate dim_period based on dates in dim_date.
 pub fn ensure_dim_period(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
-    let existing: i64 =
-        conn.query_row("SELECT COUNT(*) FROM dim_period", [], |row| row.get(0))?;
+    let existing: i64 = conn.query_row("SELECT COUNT(*) FROM dim_period", [], |row| row.get(0))?;
     if existing > 0 {
         return Ok(());
     }
 
     // Get the year range from dim_date
-    let (min_year, max_year): (i32, i32) = conn.query_row(
-        "SELECT MIN(year), MAX(year) FROM dim_date",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
+    let (min_year, max_year): (i32, i32) =
+        conn.query_row("SELECT MIN(year), MAX(year) FROM dim_date", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
 
     let mut stmt = conn.prepare(
         "INSERT OR IGNORE INTO dim_period (
@@ -226,13 +220,10 @@ pub fn ensure_dim_period(conn: &rusqlite::Connection) -> Result<(), rusqlite::Er
 
         // Week periods — find all distinct ISO weeks for this year
         let weeks: Vec<(i32, u32)> = {
-            let mut wstmt = conn.prepare(
-                "SELECT DISTINCT week FROM dim_date WHERE year = ?1 ORDER BY week",
-            )?;
+            let mut wstmt =
+                conn.prepare("SELECT DISTINCT week FROM dim_date WHERE year = ?1 ORDER BY week")?;
             let rows = wstmt.query_map([year], |row| row.get::<_, u32>(0))?;
-            rows.filter_map(|r| r.ok())
-                .map(|w| (year, w))
-                .collect()
+            rows.filter_map(|r| r.ok()).map(|w| (year, w)).collect()
         };
 
         for (y, w) in weeks {
@@ -274,7 +265,11 @@ fn prior_year_date(d: NaiveDate) -> Option<NaiveDate> {
 
 fn prior_quarter_date(d: NaiveDate, day_of_quarter: i32) -> Option<NaiveDate> {
     let q = quarter_of(d);
-    let (py, pq) = if q == 1 { (d.year() - 1, 4u8) } else { (d.year(), q - 1) };
+    let (py, pq) = if q == 1 {
+        (d.year() - 1, 4u8)
+    } else {
+        (d.year(), q - 1)
+    };
     let pqs = quarter_start_date(py, pq);
     let pqe = quarter_end_date(py, pq);
     let target = pqs + Duration::days(day_of_quarter as i64);

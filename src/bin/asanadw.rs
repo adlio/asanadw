@@ -48,7 +48,10 @@ impl asanadw::SyncProgress for StderrProgress {
     }
 
     fn on_entity_complete(&self, report: &asanadw::SyncReport) {
-        eprintln!("  [{}] Done: {} items synced", report.entity_key, report.items_synced);
+        eprintln!(
+            "  [{}] Done: {} items synced",
+            report.entity_key, report.items_synced
+        );
     }
 }
 
@@ -386,9 +389,7 @@ async fn resolve_user(db: &asanadw::Database, identifier: &str) -> anyhow::Resul
     let id = identifier.to_string();
     let resolved = db
         .reader()
-        .call(move |conn| {
-            asanadw::storage::repository::resolve_user_identifier(conn, &id)
-        })
+        .call(move |conn| asanadw::storage::repository::resolve_user_identifier(conn, &id))
         .await?;
     match resolved {
         Some(gid) => Ok(gid),
@@ -433,13 +434,27 @@ async fn main() -> anyhow::Result<()> {
             json,
         } => {
             let effective_assignee = if mine {
-                let gid = db.reader().call(|c| asanadw::storage::repository::get_config(c, "user_gid")).await?
-                    .ok_or_else(|| anyhow::anyhow!("User identity not set. Run 'asanadw sync all' first."))?;
+                let gid = db
+                    .reader()
+                    .call(|c| asanadw::storage::repository::get_config(c, "user_gid"))
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("User identity not set. Run 'asanadw sync all' first.")
+                    })?;
                 Some(gid)
             } else {
                 assignee
             };
-            handle_search(&db, &query, r#type.as_deref(), effective_assignee.as_deref(), project.as_deref(), limit, json).await?;
+            handle_search(
+                &db,
+                &query,
+                r#type.as_deref(),
+                effective_assignee.as_deref(),
+                project.as_deref(),
+                limit,
+                json,
+            )
+            .await?;
         }
         Commands::Query {
             project,
@@ -460,19 +475,36 @@ async fn main() -> anyhow::Result<()> {
             count,
         } => {
             let effective_assignee = if mine {
-                let gid = db.reader().call(|c| asanadw::storage::repository::get_config(c, "user_gid")).await?
-                    .ok_or_else(|| anyhow::anyhow!("User identity not set. Run 'asanadw sync all' first."))?;
+                let gid = db
+                    .reader()
+                    .call(|c| asanadw::storage::repository::get_config(c, "user_gid"))
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("User identity not set. Run 'asanadw sync all' first.")
+                    })?;
                 Some(gid)
             } else {
                 assignee
             };
             handle_query(
-                &db, project.as_deref(), portfolio.as_deref(), team.as_deref(),
-                effective_assignee.as_deref(), completed, incomplete, overdue,
-                created_after.as_deref(), created_before.as_deref(),
-                due_after.as_deref(), due_before.as_deref(),
-                limit, json, csv, count,
-            ).await?;
+                &db,
+                project.as_deref(),
+                portfolio.as_deref(),
+                team.as_deref(),
+                effective_assignee.as_deref(),
+                completed,
+                incomplete,
+                overdue,
+                created_after.as_deref(),
+                created_before.as_deref(),
+                due_after.as_deref(),
+                due_before.as_deref(),
+                limit,
+                json,
+                csv,
+                count,
+            )
+            .await?;
         }
         Commands::Summarize { target } => {
             handle_summarize(&db, target).await?;
@@ -504,14 +536,12 @@ async fn print_status(db: &asanadw::Database) -> anyhow::Result<()> {
         .call(|conn| {
             let tasks: i64 =
                 conn.query_row("SELECT COUNT(*) FROM fact_tasks", [], |row| row.get(0))?;
-            let projects: i64 = conn.query_row("SELECT COUNT(*) FROM dim_projects", [], |row| {
-                row.get(0)
-            })?;
+            let projects: i64 =
+                conn.query_row("SELECT COUNT(*) FROM dim_projects", [], |row| row.get(0))?;
             let users: i64 =
                 conn.query_row("SELECT COUNT(*) FROM dim_users", [], |row| row.get(0))?;
-            let comments: i64 = conn.query_row("SELECT COUNT(*) FROM fact_comments", [], |row| {
-                row.get(0)
-            })?;
+            let comments: i64 =
+                conn.query_row("SELECT COUNT(*) FROM fact_comments", [], |row| row.get(0))?;
             let monitored: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM monitored_entities WHERE sync_enabled = 1",
                 [],
@@ -551,9 +581,7 @@ async fn handle_config(db: &asanadw::Database, action: ConfigAction) -> anyhow::
                 .reader()
                 .call({
                     let key = key.clone();
-                    move |conn| {
-                        asanadw::storage::repository::get_config(conn, &key)
-                    }
+                    move |conn| asanadw::storage::repository::get_config(conn, &key)
                 })
                 .await?;
             match val {
@@ -573,9 +601,7 @@ async fn handle_config(db: &asanadw::Database, action: ConfigAction) -> anyhow::
         ConfigAction::List => {
             let items: Vec<(String, String)> = db
                 .reader()
-                .call(|conn| {
-                    asanadw::storage::repository::list_config(conn)
-                })
+                .call(|conn| asanadw::storage::repository::list_config(conn))
                 .await?;
             if items.is_empty() {
                 println!("No configuration set.");
@@ -636,22 +662,41 @@ async fn handle_monitor(dw: &asanadw::AsanaDW, action: MonitorAction) -> anyhow:
 async fn handle_sync(dw: &asanadw::AsanaDW, target: SyncTarget) -> anyhow::Result<()> {
     let progress = StderrProgress;
     match target {
-        SyncTarget::Project { identifier, days, since, full } => {
+        SyncTarget::Project {
+            identifier,
+            days,
+            since,
+            full,
+        } => {
             let options = make_sync_options(days, since.as_deref(), full);
             let report = dw.sync_project(&identifier, &options, &progress).await?;
             print_sync_report(&report);
         }
-        SyncTarget::User { identifier, days, since } => {
+        SyncTarget::User {
+            identifier,
+            days,
+            since,
+        } => {
             let options = make_sync_options(days, since.as_deref(), false);
             let report = dw.sync_user(&identifier, &options, &progress).await?;
             print_sync_report(&report);
         }
-        SyncTarget::Team { identifier, days, since, full } => {
+        SyncTarget::Team {
+            identifier,
+            days,
+            since,
+            full,
+        } => {
             let options = make_sync_options(days, since.as_deref(), full);
             let report = dw.sync_team(&identifier, &options, &progress).await?;
             print_sync_report(&report);
         }
-        SyncTarget::Portfolio { identifier, days, since, full } => {
+        SyncTarget::Portfolio {
+            identifier,
+            days,
+            since,
+            full,
+        } => {
             let options = make_sync_options(days, since.as_deref(), full);
             let report = dw.sync_portfolio(&identifier, &options, &progress).await?;
             print_sync_report(&report);
@@ -693,7 +738,9 @@ async fn handle_search(
         Some("comment") => Some(asanadw::SearchHitType::Comment),
         Some("project") => Some(asanadw::SearchHitType::Project),
         Some("custom_field") => Some(asanadw::SearchHitType::CustomField),
-        Some(other) => anyhow::bail!("Unknown search type: {other}. Use: task, comment, project, custom_field"),
+        Some(other) => {
+            anyhow::bail!("Unknown search type: {other}. Use: task, comment, project, custom_field")
+        }
         None => None,
     };
 
@@ -751,7 +798,10 @@ async fn handle_query(
     csv: bool,
     count: bool,
 ) -> anyhow::Result<()> {
-    let mut builder = asanadw::QueryBuilder::new().limit(limit).order_by("t.modified_at").descending();
+    let mut builder = asanadw::QueryBuilder::new()
+        .limit(limit)
+        .order_by("t.modified_at")
+        .descending();
 
     if let Some(p) = project {
         builder = builder.project(p);
@@ -823,11 +873,23 @@ async fn handle_summarize(db: &asanadw::Database, target: SummarizeTarget) -> an
     let agent = asanadw::llm::create_agent(db).await?;
 
     match target {
-        SummarizeTarget::Me { period, force, json } => {
-            let user_gid = db.reader().call(|c| asanadw::storage::repository::get_config(c, "user_gid")).await?
-                .ok_or_else(|| anyhow::anyhow!("User identity not set. Run 'asanadw sync all' first."))?;
+        SummarizeTarget::Me {
+            period,
+            force,
+            json,
+        } => {
+            let user_gid = db
+                .reader()
+                .call(|c| asanadw::storage::repository::get_config(c, "user_gid"))
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("User identity not set. Run 'asanadw sync all' first.")
+                })?;
             let p = asanadw::Period::parse(&period)?;
-            let summary = asanadw::llm::agents::period::summarize_user_period(db, &agent, &user_gid, &p, force).await?;
+            let summary = asanadw::llm::agents::period::summarize_user_period(
+                db, &agent, &user_gid, &p, force,
+            )
+            .await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&summary)?);
             } else {
@@ -843,8 +905,13 @@ async fn handle_summarize(db: &asanadw::Database, target: SummarizeTarget) -> an
                 }
             }
         }
-        SummarizeTarget::Task { task_gid, force, json } => {
-            let summary = asanadw::llm::agents::task::summarize_task(db, &agent, &task_gid, force).await?;
+        SummarizeTarget::Task {
+            task_gid,
+            force,
+            json,
+        } => {
+            let summary =
+                asanadw::llm::agents::task::summarize_task(db, &agent, &task_gid, force).await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&summary)?);
             } else {
@@ -856,10 +923,18 @@ async fn handle_summarize(db: &asanadw::Database, target: SummarizeTarget) -> an
                 println!("Types: {}", summary.change_types.join(", "));
             }
         }
-        SummarizeTarget::User { user_gid, period, force, json } => {
+        SummarizeTarget::User {
+            user_gid,
+            period,
+            force,
+            json,
+        } => {
             let user_gid = resolve_user(db, &user_gid).await?;
             let p = asanadw::Period::parse(&period)?;
-            let summary = asanadw::llm::agents::period::summarize_user_period(db, &agent, &user_gid, &p, force).await?;
+            let summary = asanadw::llm::agents::period::summarize_user_period(
+                db, &agent, &user_gid, &p, force,
+            )
+            .await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&summary)?);
             } else {
@@ -875,9 +950,21 @@ async fn handle_summarize(db: &asanadw::Database, target: SummarizeTarget) -> an
                 }
             }
         }
-        SummarizeTarget::Project { project_gid, period, force, json } => {
+        SummarizeTarget::Project {
+            project_gid,
+            period,
+            force,
+            json,
+        } => {
             let p = asanadw::Period::parse(&period)?;
-            let summary = asanadw::llm::agents::period::summarize_project_period(db, &agent, &project_gid, &p, force).await?;
+            let summary = asanadw::llm::agents::period::summarize_project_period(
+                db,
+                &agent,
+                &project_gid,
+                &p,
+                force,
+            )
+            .await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&summary)?);
             } else {
@@ -893,9 +980,21 @@ async fn handle_summarize(db: &asanadw::Database, target: SummarizeTarget) -> an
                 }
             }
         }
-        SummarizeTarget::Portfolio { portfolio_gid, period, force, json } => {
+        SummarizeTarget::Portfolio {
+            portfolio_gid,
+            period,
+            force,
+            json,
+        } => {
             let p = asanadw::Period::parse(&period)?;
-            let summary = asanadw::llm::agents::period::summarize_portfolio_period(db, &agent, &portfolio_gid, &p, force).await?;
+            let summary = asanadw::llm::agents::period::summarize_portfolio_period(
+                db,
+                &agent,
+                &portfolio_gid,
+                &p,
+                force,
+            )
+            .await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&summary)?);
             } else {
@@ -911,9 +1010,17 @@ async fn handle_summarize(db: &asanadw::Database, target: SummarizeTarget) -> an
                 }
             }
         }
-        SummarizeTarget::Team { team_gid, period, force, json } => {
+        SummarizeTarget::Team {
+            team_gid,
+            period,
+            force,
+            json,
+        } => {
             let p = asanadw::Period::parse(&period)?;
-            let summary = asanadw::llm::agents::period::summarize_team_period(db, &agent, &team_gid, &p, force).await?;
+            let summary = asanadw::llm::agents::period::summarize_team_period(
+                db, &agent, &team_gid, &p, force,
+            )
+            .await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&summary)?);
             } else {
@@ -937,52 +1044,85 @@ async fn handle_summarize(db: &asanadw::Database, target: SummarizeTarget) -> an
 async fn handle_metrics(db: &asanadw::Database, target: MetricsTarget) -> anyhow::Result<()> {
     match target {
         MetricsTarget::Me { period, json } => {
-            let user_gid = db.reader().call(|c| asanadw::storage::repository::get_config(c, "user_gid")).await?
-                .ok_or_else(|| anyhow::anyhow!("User identity not set. Run 'asanadw sync all' first."))?;
+            let user_gid = db
+                .reader()
+                .call(|c| asanadw::storage::repository::get_config(c, "user_gid"))
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("User identity not set. Run 'asanadw sync all' first.")
+                })?;
             let p = asanadw::Period::parse(&period)?;
             let m = asanadw::metrics::compute_user_metrics(db, &user_gid, &p).await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&m)?);
             } else {
-                println!("User Metrics: {} ({})", m.user_name.as_deref().unwrap_or(&m.user_gid), m.period_key);
+                println!(
+                    "User Metrics: {} ({})",
+                    m.user_name.as_deref().unwrap_or(&m.user_gid),
+                    m.period_key
+                );
                 print_throughput(&m.throughput);
                 print_lead_time(&m.lead_time);
                 print_collaboration(&m.collaboration);
             }
         }
-        MetricsTarget::User { user_gid, period, json } => {
+        MetricsTarget::User {
+            user_gid,
+            period,
+            json,
+        } => {
             let user_gid = resolve_user(db, &user_gid).await?;
             let p = asanadw::Period::parse(&period)?;
             let m = asanadw::metrics::compute_user_metrics(db, &user_gid, &p).await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&m)?);
             } else {
-                println!("User Metrics: {} ({})", m.user_name.as_deref().unwrap_or(&m.user_gid), m.period_key);
+                println!(
+                    "User Metrics: {} ({})",
+                    m.user_name.as_deref().unwrap_or(&m.user_gid),
+                    m.period_key
+                );
                 print_throughput(&m.throughput);
                 print_lead_time(&m.lead_time);
                 print_collaboration(&m.collaboration);
             }
         }
-        MetricsTarget::Project { project_gid, period, json } => {
+        MetricsTarget::Project {
+            project_gid,
+            period,
+            json,
+        } => {
             let p = asanadw::Period::parse(&period)?;
             let m = asanadw::metrics::compute_project_metrics(db, &project_gid, &p).await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&m)?);
             } else {
-                println!("Project Metrics: {} ({})", m.project_name.as_deref().unwrap_or(&m.project_gid), m.period_key);
+                println!(
+                    "Project Metrics: {} ({})",
+                    m.project_name.as_deref().unwrap_or(&m.project_gid),
+                    m.period_key
+                );
                 print_throughput(&m.throughput);
                 print_health(&m.health);
                 print_lead_time(&m.lead_time);
                 print_collaboration(&m.collaboration);
             }
         }
-        MetricsTarget::Portfolio { portfolio_gid, period, json } => {
+        MetricsTarget::Portfolio {
+            portfolio_gid,
+            period,
+            json,
+        } => {
             let p = asanadw::Period::parse(&period)?;
             let m = asanadw::metrics::compute_portfolio_metrics(db, &portfolio_gid, &p).await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&m)?);
             } else {
-                println!("Portfolio Metrics: {} ({})", m.portfolio_name.as_deref().unwrap_or(&m.portfolio_gid), m.period_key);
+                println!(
+                    "Portfolio Metrics: {} ({})",
+                    m.portfolio_name.as_deref().unwrap_or(&m.portfolio_gid),
+                    m.period_key
+                );
                 println!("  Projects: {}", m.project_count);
                 print_throughput(&m.throughput);
                 print_health(&m.health);
@@ -990,13 +1130,21 @@ async fn handle_metrics(db: &asanadw::Database, target: MetricsTarget) -> anyhow
                 print_collaboration(&m.collaboration);
             }
         }
-        MetricsTarget::Team { team_gid, period, json } => {
+        MetricsTarget::Team {
+            team_gid,
+            period,
+            json,
+        } => {
             let p = asanadw::Period::parse(&period)?;
             let m = asanadw::metrics::compute_team_metrics(db, &team_gid, &p).await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&m)?);
             } else {
-                println!("Team Metrics: {} ({})", m.team_name.as_deref().unwrap_or(&m.team_gid), m.period_key);
+                println!(
+                    "Team Metrics: {} ({})",
+                    m.team_name.as_deref().unwrap_or(&m.team_gid),
+                    m.period_key
+                );
                 println!("  Members: {}", m.member_count);
                 print_throughput(&m.throughput);
                 print_health(&m.health);
@@ -1018,8 +1166,14 @@ fn print_throughput(t: &asanadw::metrics::ThroughputMetrics) {
 fn print_health(h: &asanadw::metrics::HealthMetrics) {
     println!("  Health:");
     println!("    Open tasks:  {}", h.total_open);
-    println!("    Overdue:     {} ({:.1}%)", h.overdue_count, h.overdue_pct);
-    println!("    Unassigned:  {} ({:.1}%)", h.unassigned_count, h.unassigned_pct);
+    println!(
+        "    Overdue:     {} ({:.1}%)",
+        h.overdue_count, h.overdue_pct
+    );
+    println!(
+        "    Unassigned:  {} ({:.1}%)",
+        h.unassigned_count, h.unassigned_pct
+    );
     println!("    Stale (14d): {}", h.stale_count);
 }
 
@@ -1028,9 +1182,19 @@ fn print_lead_time(lt: &asanadw::metrics::LeadTimeMetrics) {
     match lt.avg_days_to_complete {
         Some(avg) => {
             println!("    Average: {avg:.1} days");
-            println!("    Median:  {:.1} days", lt.median_days_to_complete.unwrap_or(0.0));
-            println!("    P90:     {:.1} days", lt.p90_days_to_complete.unwrap_or(0.0));
-            println!("    Range:   {}-{} days", lt.min_days_to_complete.unwrap_or(0), lt.max_days_to_complete.unwrap_or(0));
+            println!(
+                "    Median:  {:.1} days",
+                lt.median_days_to_complete.unwrap_or(0.0)
+            );
+            println!(
+                "    P90:     {:.1} days",
+                lt.p90_days_to_complete.unwrap_or(0.0)
+            );
+            println!(
+                "    Range:   {}-{} days",
+                lt.min_days_to_complete.unwrap_or(0),
+                lt.max_days_to_complete.unwrap_or(0)
+            );
         }
         None => println!("    No completed tasks in period"),
     }

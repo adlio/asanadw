@@ -32,10 +32,22 @@ mod tests {
 
     #[test]
     fn test_last_day_of_month() {
-        assert_eq!(last_day_of_month(2025, 1), NaiveDate::from_ymd_opt(2025, 1, 31).unwrap());
-        assert_eq!(last_day_of_month(2025, 2), NaiveDate::from_ymd_opt(2025, 2, 28).unwrap());
-        assert_eq!(last_day_of_month(2024, 2), NaiveDate::from_ymd_opt(2024, 2, 29).unwrap()); // Leap year
-        assert_eq!(last_day_of_month(2025, 12), NaiveDate::from_ymd_opt(2025, 12, 31).unwrap());
+        assert_eq!(
+            last_day_of_month(2025, 1),
+            NaiveDate::from_ymd_opt(2025, 1, 31).unwrap()
+        );
+        assert_eq!(
+            last_day_of_month(2025, 2),
+            NaiveDate::from_ymd_opt(2025, 2, 28).unwrap()
+        );
+        assert_eq!(
+            last_day_of_month(2024, 2),
+            NaiveDate::from_ymd_opt(2024, 2, 29).unwrap()
+        ); // Leap year
+        assert_eq!(
+            last_day_of_month(2025, 12),
+            NaiveDate::from_ymd_opt(2025, 12, 31).unwrap()
+        );
     }
 
     #[test]
@@ -45,22 +57,34 @@ mod tests {
         assert_eq!(quarter_of(NaiveDate::from_ymd_opt(2025, 4, 1).unwrap()), 2);
         assert_eq!(quarter_of(NaiveDate::from_ymd_opt(2025, 6, 30).unwrap()), 2);
         assert_eq!(quarter_of(NaiveDate::from_ymd_opt(2025, 7, 1).unwrap()), 3);
-        assert_eq!(quarter_of(NaiveDate::from_ymd_opt(2025, 12, 31).unwrap()), 4);
+        assert_eq!(
+            quarter_of(NaiveDate::from_ymd_opt(2025, 12, 31).unwrap()),
+            4
+        );
     }
 
     #[test]
     fn test_strip_code_fences_json() {
-        assert_eq!(strip_code_fences("```json\n{\"key\": \"value\"}\n```"), "{\"key\": \"value\"}");
+        assert_eq!(
+            strip_code_fences("```json\n{\"key\": \"value\"}\n```"),
+            "{\"key\": \"value\"}"
+        );
     }
 
     #[test]
     fn test_strip_code_fences_plain() {
-        assert_eq!(strip_code_fences("```\n{\"key\": \"value\"}\n```"), "{\"key\": \"value\"}");
+        assert_eq!(
+            strip_code_fences("```\n{\"key\": \"value\"}\n```"),
+            "{\"key\": \"value\"}"
+        );
     }
 
     #[test]
     fn test_strip_code_fences_none() {
-        assert_eq!(strip_code_fences("{\"key\": \"value\"}"), "{\"key\": \"value\"}");
+        assert_eq!(
+            strip_code_fences("{\"key\": \"value\"}"),
+            "{\"key\": \"value\"}"
+        );
     }
 
     #[test]

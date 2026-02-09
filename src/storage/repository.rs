@@ -122,10 +122,7 @@ pub fn upsert_task(conn: &Connection, task: &asanaclient::Task) -> Result<(), ru
 
     let created_at = task.created_at.as_deref().unwrap_or("");
     let created_date_key = date_key_from_iso(created_at);
-    let completed_date_key = task
-        .completed_at
-        .as_deref()
-        .map(date_key_from_iso);
+    let completed_date_key = task.completed_at.as_deref().map(date_key_from_iso);
 
     let days_to_complete = compute_days_to_complete(created_at, task.completed_at.as_deref());
     let is_overdue = compute_is_overdue(task.completed, task.due_on.as_deref());
@@ -511,9 +508,7 @@ pub fn remove_monitored_entity(
     Ok(count > 0)
 }
 
-pub fn list_monitored_entities(
-    conn: &Connection,
-) -> Result<Vec<MonitoredEntity>, rusqlite::Error> {
+pub fn list_monitored_entities(conn: &Connection) -> Result<Vec<MonitoredEntity>, rusqlite::Error> {
     let mut stmt = conn.prepare(
         "SELECT entity_key, entity_type, entity_gid, display_name, added_at, last_sync_at, sync_enabled
          FROM monitored_entities WHERE sync_enabled = 1 ORDER BY added_at",
@@ -883,10 +878,7 @@ mod tests {
 
     #[test]
     fn test_date_key_from_iso() {
-        assert_eq!(
-            date_key_from_iso("2025-01-15T10:30:00.000Z"),
-            "2025-01-15"
-        );
+        assert_eq!(date_key_from_iso("2025-01-15T10:30:00.000Z"), "2025-01-15");
         assert_eq!(date_key_from_iso("2025-01-15"), "2025-01-15");
     }
 
@@ -908,10 +900,7 @@ mod tests {
             compute_days_to_complete("2025-01-01T00:00:00Z", Some("2025-01-11T00:00:00Z")),
             Some(10)
         );
-        assert_eq!(
-            compute_days_to_complete("2025-01-01", None),
-            None
-        );
+        assert_eq!(compute_days_to_complete("2025-01-01", None), None);
     }
 
     #[tokio::test]
@@ -929,10 +918,16 @@ mod tests {
                 upsert_user(conn, &user)?;
 
                 // Numeric GID resolves directly (no DB lookup)
-                assert_eq!(resolve_user_identifier(conn, "12345")?, Some("12345".to_string()));
+                assert_eq!(
+                    resolve_user_identifier(conn, "12345")?,
+                    Some("12345".to_string())
+                );
 
                 // Email resolves to GID
-                assert_eq!(resolve_user_identifier(conn, "alice@example.com")?, Some("12345".to_string()));
+                assert_eq!(
+                    resolve_user_identifier(conn, "alice@example.com")?,
+                    Some("12345".to_string())
+                );
 
                 // Unknown email returns None
                 assert_eq!(resolve_user_identifier(conn, "nobody@example.com")?, None);
