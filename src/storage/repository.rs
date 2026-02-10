@@ -497,6 +497,26 @@ pub fn add_monitored_entity(
     Ok(())
 }
 
+/// Ensure a `monitored_entities` row exists for the given entity so that
+/// sync tokens and timestamps can be stored against it.  Portfolio-discovered
+/// projects are not explicitly added by the user, so they may lack a row.
+/// Uses `INSERT OR IGNORE` — existing rows (including user-added ones with
+/// `sync_enabled = 1`) are left untouched.
+pub fn ensure_entity_for_sync(
+    conn: &Connection,
+    entity_key: &str,
+    entity_type: &str,
+    entity_gid: &str,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "INSERT OR IGNORE INTO monitored_entities (
+            entity_key, entity_type, entity_gid, added_at, sync_enabled
+        ) VALUES (?1, ?2, ?3, datetime('now'), 0)",
+        params![entity_key, entity_type, entity_gid],
+    )?;
+    Ok(())
+}
+
 pub fn remove_monitored_entity(
     conn: &Connection,
     entity_key: &str,
@@ -1013,6 +1033,60 @@ mod tests {
                     get_event_sync_token(conn, "project:200")?,
                     Some("token_for_200".to_string())
                 );
+
+                Ok::<(), rusqlite::Error>(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_ensure_entity_for_sync_enables_token_storage() {
+        let db = Database::open_memory().await.unwrap();
+
+        db.writer()
+            .call(|conn| {
+                // Portfolio-discovered project — no monitored_entities row yet
+                ensure_entity_for_sync(conn, "project:500", "project", "500")?;
+
+                // Token should now be storable and retrievable
+                set_event_sync_token(conn, "project:500", "tok_abc")?;
+                let token = get_event_sync_token(conn, "project:500")?;
+                assert_eq!(token, Some("tok_abc".to_string()));
+
+                // Row should have sync_enabled = 0 (not a user-monitored entity)
+                let entities = list_monitored_entities(conn)?;
+                assert!(
+                    entities.iter().all(|e| e.entity_key != "project:500"),
+                    "ensure_entity_for_sync rows should not appear in list_monitored_entities"
+                );
+
+                Ok::<(), rusqlite::Error>(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_ensure_entity_for_sync_does_not_clobber_existing() {
+        let db = Database::open_memory().await.unwrap();
+
+        db.writer()
+            .call(|conn| {
+                // User explicitly adds a project (sync_enabled = 1, has display name)
+                add_monitored_entity(conn, "project:600", "project", "600", Some("My Project"))?;
+                set_event_sync_token(conn, "project:600", "existing_token")?;
+
+                // Now ensure_entity_for_sync is called (e.g. via portfolio sync)
+                ensure_entity_for_sync(conn, "project:600", "project", "600")?;
+
+                // Existing row should be untouched
+                let token = get_event_sync_token(conn, "project:600")?;
+                assert_eq!(token, Some("existing_token".to_string()));
+
+                // Still appears in list (sync_enabled = 1 preserved)
+                let entities = list_monitored_entities(conn)?;
+                assert!(entities.iter().any(|e| e.entity_key == "project:600"));
 
                 Ok::<(), rusqlite::Error>(())
             })

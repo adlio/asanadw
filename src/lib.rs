@@ -14,7 +14,9 @@ pub use query::builder::QueryBuilder;
 pub use query::period::Period;
 pub use search::{SearchHit, SearchHitType, SearchOptions, SearchResults};
 pub use storage::Database;
-pub use sync::{NoopProgress, SyncOptions, SyncProgress, SyncReport, SyncStatus};
+pub use sync::{
+    IncrementalSyncSummary, NoopProgress, SyncOptions, SyncProgress, SyncReport, SyncStatus,
+};
 pub use url::{generate_asana_url, parse_asana_url, AsanaUrlInfo};
 
 // Re-export repository types needed by the binary crate, but not the module itself

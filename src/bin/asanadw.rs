@@ -43,8 +43,32 @@ impl asanadw::SyncProgress for StderrProgress {
         }
     }
 
-    fn on_incremental_sync(&self, entity_key: &str, changed_tasks: usize) {
-        eprintln!("  [{entity_key}] Incremental: {changed_tasks} tasks changed");
+    fn on_status_updates_synced(&self, entity_key: &str, count: usize) {
+        if count > 0 {
+            eprintln!("  [{entity_key}] Synced {count} status updates");
+        }
+    }
+
+    fn on_incremental_sync(&self, entity_key: &str, summary: &asanadw::IncrementalSyncSummary) {
+        let mut parts: Vec<String> = Vec::new();
+        if summary.tasks_changed > 0 {
+            parts.push(format!("{} tasks", summary.tasks_changed));
+        }
+        if summary.project_changed {
+            parts.push("project metadata".to_string());
+        }
+        if summary.sections_changed {
+            parts.push("sections".to_string());
+        }
+        if summary.status_updates_changed {
+            parts.push("status updates".to_string());
+        }
+        let detail = if parts.is_empty() {
+            "no changes".to_string()
+        } else {
+            parts.join(", ")
+        };
+        eprintln!("  [{entity_key}] Incremental: {detail}");
     }
 
     fn on_entity_complete(&self, report: &asanadw::SyncReport) {

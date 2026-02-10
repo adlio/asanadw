@@ -6,7 +6,7 @@ use crate::error::Result;
 use crate::storage::repository;
 use crate::storage::Database;
 use crate::sync::rate_limit::retry_api;
-use crate::sync::{SyncOptions, SyncProgress, SyncReport, SyncStatus};
+use crate::sync::{IncrementalSyncSummary, SyncOptions, SyncProgress, SyncReport, SyncStatus};
 
 /// Maximum number of changed tasks before falling back to full sync.
 /// If events report more changes than this, individual GETs would be slower
@@ -15,6 +15,224 @@ const INCREMENTAL_THRESHOLD: usize = 50;
 
 /// Task fields requested during project sync (both incremental and full).
 const PROJECT_TASK_FIELDS: &str = "gid,name,completed,completed_at,assignee,assignee.name,assignee.email,due_on,due_at,start_on,start_at,created_at,modified_at,notes,html_notes,parent,parent.name,num_subtasks,num_likes,memberships,memberships.project,memberships.project.name,memberships.section,memberships.section.name,tags,tags.name,custom_fields,custom_fields.gid,custom_fields.name,custom_fields.display_value,custom_fields.resource_subtype,custom_fields.text_value,custom_fields.number_value,custom_fields.enum_value,custom_fields.enum_value.gid,custom_fields.enum_value.name,custom_fields.enum_value.color,custom_fields.enum_value.enabled,custom_fields.multi_enum_values,custom_fields.multi_enum_values.gid,custom_fields.multi_enum_values.name,custom_fields.multi_enum_values.color,custom_fields.multi_enum_values.enabled,custom_fields.date_value,custom_fields.date_value.date,custom_fields.date_value.date_time,permalink_url";
+
+/// Store status updates and their authors in the database.
+///
+/// Shared by full sync, incremental sync, and portfolio sync paths.
+async fn upsert_status_updates(
+    db: &Database,
+    parent_gid: &str,
+    parent_type: &str,
+    statuses: &[asanaclient::types::StatusUpdate],
+) -> Result<()> {
+    if statuses.is_empty() {
+        return Ok(());
+    }
+    db.writer()
+        .call({
+            let parent_gid = parent_gid.to_string();
+            let parent_type = parent_type.to_string();
+            let statuses = statuses.to_vec();
+            move |conn| {
+                for status in &statuses {
+                    if let Some(ref author) = status.created_by {
+                        repository::upsert_user_minimal(conn, &author.gid, author.name.as_deref())?;
+                    }
+                    repository::upsert_status_update(conn, &parent_gid, &parent_type, status)?;
+                }
+                Ok::<(), rusqlite::Error>(())
+            }
+        })
+        .await?;
+    Ok(())
+}
+
+/// Classified summary of Asana events by resource type.
+struct EventSummary {
+    changed_task_gids: HashSet<String>,
+    project_changed: bool,
+    sections_changed: bool,
+    status_updates_changed: bool,
+}
+
+impl EventSummary {
+    fn has_changes(&self) -> bool {
+        !self.changed_task_gids.is_empty()
+            || self.project_changed
+            || self.sections_changed
+            || self.status_updates_changed
+    }
+
+    fn to_progress_summary(&self) -> IncrementalSyncSummary {
+        IncrementalSyncSummary {
+            tasks_changed: self.changed_task_gids.len(),
+            project_changed: self.project_changed,
+            sections_changed: self.sections_changed,
+            status_updates_changed: self.status_updates_changed,
+        }
+    }
+}
+
+/// Classify Asana events into changed resource categories.
+fn classify_events(events: &[asanaclient::Event]) -> EventSummary {
+    let mut summary = EventSummary {
+        changed_task_gids: HashSet::new(),
+        project_changed: false,
+        sections_changed: false,
+        status_updates_changed: false,
+    };
+    for event in events {
+        let resource_type = event
+            .resource
+            .resource_type
+            .as_deref()
+            .or(event.resource_type.as_deref())
+            .unwrap_or("");
+        match resource_type {
+            "task" => match event.action.as_str() {
+                "changed" | "added" | "undeleted" => {
+                    summary.changed_task_gids.insert(event.resource.gid.clone());
+                }
+                _ => {}
+            },
+            "story" => match event.action.as_str() {
+                "changed" | "added" => {
+                    // Re-fetch the parent task's comments
+                    if let Some(ref parent) = event.parent {
+                        summary.changed_task_gids.insert(parent.gid.clone());
+                    }
+                }
+                _ => {}
+            },
+            "section" => {
+                summary.sections_changed = true;
+            }
+            "project" => {
+                if event.action == "changed" {
+                    summary.project_changed = true;
+                }
+            }
+            "status_update" => match event.action.as_str() {
+                "changed" | "added" => {
+                    summary.status_updates_changed = true;
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    summary
+}
+
+/// Store project metadata (owner, team, project, sections) in the database.
+///
+/// Shared by full sync and incremental sync (project/section refresh) paths.
+async fn upsert_project_metadata(
+    db: &Database,
+    project: &asanaclient::Project,
+    sections: &[super::api_helpers::SectionInfo],
+) -> Result<()> {
+    db.writer()
+        .call({
+            let project = project.clone();
+            let sections = sections.to_vec();
+            let project_gid = project.gid.clone();
+            move |conn| {
+                if let Some(ref owner) = project.owner {
+                    repository::upsert_user_minimal(conn, &owner.gid, owner.name.as_deref())?;
+                }
+                if let Some(ref team) = project.team {
+                    let team_name = team.name.as_deref().unwrap_or("");
+                    let workspace_gid = project
+                        .workspace
+                        .as_ref()
+                        .map(|w| w.gid.as_str())
+                        .unwrap_or("");
+                    repository::upsert_team(conn, &team.gid, team_name, workspace_gid, None)?;
+                }
+                repository::upsert_project(conn, &project)?;
+                for (i, section) in sections.iter().enumerate() {
+                    repository::upsert_section(
+                        conn,
+                        &project_gid,
+                        &section.gid,
+                        &section.name,
+                        i as i32,
+                    )?;
+                }
+                Ok::<(), rusqlite::Error>(())
+            }
+        })
+        .await?;
+    Ok(())
+}
+
+/// Upsert tasks and their comments to the database.
+///
+/// Handles the FK constraint dance: upsert referenced users first, temporarily
+/// disable FK checks for tasks (parent_gid may reference tasks not yet synced),
+/// then re-enable FK checks before inserting comments.
+///
+/// Shared by full sync and incremental sync paths.
+async fn upsert_tasks_and_comments(
+    db: &Database,
+    tasks: &[asanaclient::Task],
+    task_comments: &[(String, Vec<asanaclient::Story>)],
+) -> Result<()> {
+    if tasks.is_empty() && task_comments.is_empty() {
+        return Ok(());
+    }
+    db.writer()
+        .call({
+            let tasks = tasks.to_vec();
+            let task_comments = task_comments.to_vec();
+            move |conn| {
+                // Upsert referenced users BEFORE tasks (FK constraints)
+                for task in &tasks {
+                    if let Some(ref assignee) = task.assignee {
+                        repository::upsert_user_minimal_with_email(
+                            conn,
+                            &assignee.gid,
+                            assignee.name.as_deref(),
+                            assignee.email.as_deref(),
+                        )?;
+                    }
+                }
+                for (_task_gid, comments) in &task_comments {
+                    for comment in comments {
+                        if let Some(ref author) = comment.created_by {
+                            repository::upsert_user_minimal(
+                                conn,
+                                &author.gid,
+                                author.name.as_deref(),
+                            )?;
+                        }
+                    }
+                }
+
+                // Temporarily disable FK checks — parent_gid may reference
+                // tasks not yet synced
+                conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+
+                for task in &tasks {
+                    repository::upsert_task(conn, task)?;
+                }
+
+                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+
+                // Upsert comments
+                for (task_gid, comments) in &task_comments {
+                    for comment in comments {
+                        repository::upsert_comment(conn, task_gid, comment)?;
+                    }
+                }
+
+                Ok::<(), rusqlite::Error>(())
+            }
+        })
+        .await?;
+    Ok(())
+}
 
 /// Sync a single project's tasks and metadata to the database.
 ///
@@ -28,6 +246,20 @@ pub async fn sync_project(
     options: &SyncOptions,
     progress: &dyn SyncProgress,
 ) -> Result<SyncReport> {
+    // Ensure a monitored_entities row exists so sync tokens and timestamps
+    // can be stored.  Portfolio-discovered projects won't have one otherwise,
+    // causing every sync to fall back to a full fetch.
+    let entity_key = format!("project:{project_gid}");
+    db.writer()
+        .call({
+            let entity_key = entity_key.clone();
+            let project_gid = project_gid.to_string();
+            move |conn| {
+                repository::ensure_entity_for_sync(conn, &entity_key, "project", &project_gid)
+            }
+        })
+        .await?;
+
     // Try incremental sync via events
     if !options.full {
         match sync_project_incremental(db, client, project_gid, options, progress).await {
@@ -106,29 +338,11 @@ async fn sync_project_incremental(
         Err(e) => return Err(e.into()),
     };
 
-    // Extract the set of task GIDs that changed
-    let mut changed_task_gids: HashSet<String> = HashSet::new();
-    for event in &events_response.data {
-        let resource_type = event
-            .resource
-            .resource_type
-            .as_deref()
-            .or(event.resource_type.as_deref())
-            .unwrap_or("");
-        if resource_type != "task" {
-            continue;
-        }
-        match event.action.as_str() {
-            "changed" | "added" | "undeleted" => {
-                changed_task_gids.insert(event.resource.gid.clone());
-            }
-            // deleted/removed: defer to next full sync for cleanup
-            _ => {}
-        }
-    }
+    // Classify events by resource type
+    let summary = classify_events(&events_response.data);
 
-    // If no tasks changed, just update the token and return
-    if changed_task_gids.is_empty() {
+    // If nothing changed, just update the token and return
+    if !summary.has_changes() {
         let new_token = events_response.sync.clone();
         db.writer()
             .call({
@@ -141,7 +355,7 @@ async fn sync_project_incremental(
             })
             .await?;
 
-        progress.on_incremental_sync(&entity_key, 0);
+        progress.on_incremental_sync(&entity_key, &summary.to_progress_summary());
 
         return Ok(Some(SyncReport {
             entity_key,
@@ -154,11 +368,11 @@ async fn sync_project_incremental(
         }));
     }
 
-    // If too many changes, fall back to full sync (store the new token first)
-    if changed_task_gids.len() > INCREMENTAL_THRESHOLD {
+    // If too many task changes, fall back to full sync (store the new token first)
+    if summary.changed_task_gids.len() > INCREMENTAL_THRESHOLD {
         log::info!(
             "{} tasks changed for {entity_key} (threshold: {INCREMENTAL_THRESHOLD}), falling back to full sync",
-            changed_task_gids.len()
+            summary.changed_task_gids.len()
         );
         let new_token = events_response.sync.clone();
         db.writer()
@@ -170,12 +384,12 @@ async fn sync_project_incremental(
         return Ok(None);
     }
 
-    progress.on_incremental_sync(&entity_key, changed_task_gids.len());
+    progress.on_incremental_sync(&entity_key, &summary.to_progress_summary());
 
     // Fetch full task data for each changed task
     let mut tasks: Vec<asanaclient::Task> = Vec::new();
     let mut fetch_failures: u64 = 0;
-    for gid in &changed_task_gids {
+    for gid in &summary.changed_task_gids {
         let path = format!("/tasks/{gid}");
         let query_params = [("opt_fields", PROJECT_TASK_FIELDS)];
         match retry_api!(client.get::<asanaclient::Task>(&path, &query_params)) {
@@ -212,61 +426,35 @@ async fn sync_project_incremental(
 
     let total_synced = tasks.len() as u64;
 
-    // Write changed tasks and comments to DB
+    // Store tasks and comments
+    upsert_tasks_and_comments(db, &tasks, &task_comments).await?;
+
+    // Update sync token and timestamp
     let new_token = events_response.sync.clone();
     db.writer()
         .call({
-            let tasks = tasks.clone();
             let entity_key = entity_key.clone();
             move |conn| {
-                // Upsert referenced users BEFORE tasks (FK constraints)
-                for task in &tasks {
-                    if let Some(ref assignee) = task.assignee {
-                        repository::upsert_user_minimal_with_email(
-                            conn,
-                            &assignee.gid,
-                            assignee.name.as_deref(),
-                            assignee.email.as_deref(),
-                        )?;
-                    }
-                }
-                for (_task_gid, comments) in &task_comments {
-                    for comment in comments {
-                        if let Some(ref author) = comment.created_by {
-                            repository::upsert_user_minimal(
-                                conn,
-                                &author.gid,
-                                author.name.as_deref(),
-                            )?;
-                        }
-                    }
-                }
-
-                // Temporarily disable FK checks for tasks — parent_gid may reference
-                // tasks not yet synced
-                conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
-
-                for task in &tasks {
-                    repository::upsert_task(conn, task)?;
-                }
-
-                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-
-                // Upsert comments
-                for (task_gid, comments) in &task_comments {
-                    for comment in comments {
-                        repository::upsert_comment(conn, task_gid, comment)?;
-                    }
-                }
-
-                // Update sync token and timestamp
                 repository::set_event_sync_token(conn, &entity_key, &new_token)?;
                 repository::update_monitored_entity_sync_time(conn, &entity_key)?;
-
                 Ok::<(), rusqlite::Error>(())
             }
         })
         .await?;
+
+    // Refresh project metadata and/or sections if changed
+    if summary.project_changed || summary.sections_changed {
+        let project = retry_api!(client.projects().get_full(project_gid))?;
+        let sections = super::api_helpers::get_project_sections(client, project_gid).await?;
+        upsert_project_metadata(db, &project, &sections).await?;
+    }
+
+    // Refresh status updates if changed
+    if summary.status_updates_changed {
+        let statuses = retry_api!(client.projects().status_updates(project_gid))?;
+        progress.on_status_updates_synced(&entity_key, statuses.len());
+        upsert_status_updates(db, project_gid, "project", &statuses).await?;
+    }
 
     let status = if fetch_failures == 0 {
         SyncStatus::Success
@@ -313,47 +501,10 @@ async fn sync_project_full(
         })
         .await?;
 
-    // Fetch project details and upsert
+    // Fetch and store project metadata + sections
     let project = retry_api!(client.projects().get_full(project_gid))?;
-
-    // Fetch sections
     let sections = super::api_helpers::get_project_sections(client, project_gid).await?;
-
-    db.writer()
-        .call({
-            let project = project.clone();
-            let project_gid = project_gid.to_string();
-            let sections = sections.clone();
-            move |conn| {
-                // Insert referenced entities before the project (FK constraints)
-                if let Some(ref owner) = project.owner {
-                    repository::upsert_user_minimal(conn, &owner.gid, owner.name.as_deref())?;
-                }
-                if let Some(ref team) = project.team {
-                    let team_name = team.name.as_deref().unwrap_or("");
-                    let workspace_gid = project
-                        .workspace
-                        .as_ref()
-                        .map(|w| w.gid.as_str())
-                        .unwrap_or("");
-                    repository::upsert_team(conn, &team.gid, team_name, workspace_gid, None)?;
-                }
-
-                repository::upsert_project(conn, &project)?;
-
-                for (i, section) in sections.iter().enumerate() {
-                    repository::upsert_section(
-                        conn,
-                        &project_gid,
-                        &section.gid,
-                        &section.name,
-                        i as i32,
-                    )?;
-                }
-                Ok::<(), rusqlite::Error>(())
-            }
-        })
-        .await?;
+    upsert_project_metadata(db, &project, &sections).await?;
 
     // Create sync job record
     let today = chrono::Local::now().date_naive();
@@ -418,56 +569,13 @@ async fn sync_project_full(
 
     let total_synced = tasks.len() as u64;
 
-    // Write all tasks and comments to DB
-    db.writer()
-        .call({
-            let tasks = tasks.clone();
-            move |conn| {
-                // Upsert all referenced users BEFORE tasks (FK: assignee_gid → dim_users)
-                for task in &tasks {
-                    if let Some(ref assignee) = task.assignee {
-                        repository::upsert_user_minimal_with_email(
-                            conn,
-                            &assignee.gid,
-                            assignee.name.as_deref(),
-                            assignee.email.as_deref(),
-                        )?;
-                    }
-                }
-                for (_task_gid, comments) in &task_comments {
-                    for comment in comments {
-                        if let Some(ref author) = comment.created_by {
-                            repository::upsert_user_minimal(
-                                conn,
-                                &author.gid,
-                                author.name.as_deref(),
-                            )?;
-                        }
-                    }
-                }
+    // Store tasks and comments
+    upsert_tasks_and_comments(db, &tasks, &task_comments).await?;
 
-                // Temporarily disable FK checks for tasks — parent_gid may reference
-                // tasks not yet synced, and created_date_key may be outside dim_date range
-                conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
-
-                for task in &tasks {
-                    repository::upsert_task(conn, task)?;
-                }
-
-                // Re-enable FK checks before inserting comments (which have valid FKs)
-                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-
-                // Upsert comments
-                for (task_gid, comments) in &task_comments {
-                    for comment in comments {
-                        repository::upsert_comment(conn, task_gid, comment)?;
-                    }
-                }
-
-                Ok::<(), rusqlite::Error>(())
-            }
-        })
-        .await?;
+    // Fetch and store status updates for the project
+    let statuses = retry_api!(client.projects().status_updates(project_gid))?;
+    progress.on_status_updates_synced(&entity_key, statuses.len());
+    upsert_status_updates(db, project_gid, "project", &statuses).await?;
 
     let status = if total_synced > 0 || tasks.is_empty() {
         SyncStatus::Success
@@ -685,6 +793,11 @@ pub async fn sync_portfolio(
             }
         })
         .await?;
+
+    // Fetch and store status updates for the portfolio
+    let statuses = retry_api!(client.portfolios().status_updates(portfolio_gid))?;
+    progress.on_status_updates_synced(&entity_key, statuses.len());
+    upsert_status_updates(db, portfolio_gid, "portfolio", &statuses).await?;
 
     // Fetch portfolio items (projects)
     let items = retry_api!(client.portfolios().items(portfolio_gid))?;

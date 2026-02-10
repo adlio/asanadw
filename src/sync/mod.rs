@@ -6,17 +6,35 @@ pub mod syncer;
 use chrono::NaiveDate;
 use serde::Serialize;
 
+/// Summary of changes detected during incremental sync.
+///
+/// Passed to [`SyncProgress::on_incremental_sync`] so consumers can see
+/// exactly which resource types changed, not just task counts.
+#[derive(Debug, Clone)]
+pub struct IncrementalSyncSummary {
+    pub tasks_changed: usize,
+    pub project_changed: bool,
+    pub sections_changed: bool,
+    pub status_updates_changed: bool,
+}
+
 /// Trait for receiving progress callbacks during sync operations.
 ///
-/// All methods have default no-op implementations so consumers only need
-/// to override the callbacks they care about. Library users who don't
+/// Methods are ordered to match the typical temporal call sequence during a
+/// sync operation. All methods have default no-op implementations so consumers
+/// only need to override the callbacks they care about. Library users who don't
 /// need progress can pass `&NoopProgress`.
+///
+/// Note: only tasks count toward `items_synced` in [`SyncReport`]. Status
+/// updates, sections, and project metadata are auxiliary data tracked via
+/// their own callbacks.
 pub trait SyncProgress: Send + Sync {
     fn on_entity_start(&self, _entity_key: &str, _index: usize, _total: usize) {}
     fn on_tasks_fetched(&self, _entity_key: &str, _count: usize) {}
     fn on_comments_skipped(&self, _entity_key: &str, _skipped: usize, _total: usize) {}
     fn on_comments_progress(&self, _entity_key: &str, _current: usize, _total: usize) {}
-    fn on_incremental_sync(&self, _entity_key: &str, _changed_tasks: usize) {}
+    fn on_status_updates_synced(&self, _entity_key: &str, _count: usize) {}
+    fn on_incremental_sync(&self, _entity_key: &str, _summary: &IncrementalSyncSummary) {}
     fn on_entity_complete(&self, _report: &SyncReport) {}
 }
 
