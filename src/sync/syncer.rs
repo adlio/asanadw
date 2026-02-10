@@ -449,11 +449,17 @@ async fn sync_project_incremental(
         upsert_project_metadata(db, &project, &sections).await?;
     }
 
-    // Refresh status updates if changed
+    // Refresh status updates if changed (non-fatal if unavailable)
     if summary.status_updates_changed {
-        let statuses = retry_api!(client.projects().status_updates(project_gid))?;
-        progress.on_status_updates_synced(&entity_key, statuses.len());
-        upsert_status_updates(db, project_gid, "project", &statuses).await?;
+        match retry_api!(client.projects().status_updates(project_gid)) {
+            Ok(statuses) => {
+                progress.on_status_updates_synced(&entity_key, statuses.len());
+                upsert_status_updates(db, project_gid, "project", &statuses).await?;
+            }
+            Err(e) => {
+                log::warn!("Failed to fetch status updates for {entity_key}: {e}");
+            }
+        }
     }
 
     let status = if fetch_failures == 0 {
@@ -572,10 +578,16 @@ async fn sync_project_full(
     // Store tasks and comments
     upsert_tasks_and_comments(db, &tasks, &task_comments).await?;
 
-    // Fetch and store status updates for the project
-    let statuses = retry_api!(client.projects().status_updates(project_gid))?;
-    progress.on_status_updates_synced(&entity_key, statuses.len());
-    upsert_status_updates(db, project_gid, "project", &statuses).await?;
+    // Fetch and store status updates for the project (non-fatal if unavailable)
+    match retry_api!(client.projects().status_updates(project_gid)) {
+        Ok(statuses) => {
+            progress.on_status_updates_synced(&entity_key, statuses.len());
+            upsert_status_updates(db, project_gid, "project", &statuses).await?;
+        }
+        Err(e) => {
+            log::warn!("Failed to fetch status updates for {entity_key}: {e}");
+        }
+    }
 
     let status = if total_synced > 0 || tasks.is_empty() {
         SyncStatus::Success
@@ -794,10 +806,16 @@ pub async fn sync_portfolio(
         })
         .await?;
 
-    // Fetch and store status updates for the portfolio
-    let statuses = retry_api!(client.portfolios().status_updates(portfolio_gid))?;
-    progress.on_status_updates_synced(&entity_key, statuses.len());
-    upsert_status_updates(db, portfolio_gid, "portfolio", &statuses).await?;
+    // Fetch and store status updates for the portfolio (non-fatal if unavailable)
+    match retry_api!(client.portfolios().status_updates(portfolio_gid)) {
+        Ok(statuses) => {
+            progress.on_status_updates_synced(&entity_key, statuses.len());
+            upsert_status_updates(db, portfolio_gid, "portfolio", &statuses).await?;
+        }
+        Err(e) => {
+            log::warn!("Failed to fetch status updates for {entity_key}: {e}");
+        }
+    }
 
     // Fetch portfolio items (projects)
     let items = retry_api!(client.portfolios().items(portfolio_gid))?;
