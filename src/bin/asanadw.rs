@@ -99,8 +99,9 @@ enum Commands {
     /// Search across all synced data
     Search {
         /// Search query
-        query: String,
-        /// Filter by type: task, comment, project, custom_field
+        #[arg(num_args = 1..)]
+        query: Vec<String>,
+        /// Filter by type: task, comment, project, portfolio, custom_field
         #[arg(long, value_name = "TYPE")]
         r#type: Option<String>,
         /// Filter by assignee GID or email
@@ -457,6 +458,7 @@ async fn main() -> anyhow::Result<()> {
             limit,
             json,
         } => {
+            let query = query.join(" ");
             let effective_assignee = if mine {
                 let gid = db
                     .reader()
@@ -761,9 +763,10 @@ async fn handle_search(
         Some("task") => Some(asanadw::SearchHitType::Task),
         Some("comment") => Some(asanadw::SearchHitType::Comment),
         Some("project") => Some(asanadw::SearchHitType::Project),
+        Some("portfolio") => Some(asanadw::SearchHitType::Portfolio),
         Some("custom_field") => Some(asanadw::SearchHitType::CustomField),
         Some(other) => {
-            anyhow::bail!("Unknown search type: {other}. Use: task, comment, project, custom_field")
+            anyhow::bail!("Unknown search type: {other}. Use: task, comment, project, portfolio, custom_field")
         }
         None => None,
     };
@@ -790,6 +793,7 @@ async fn handle_search(
                 asanadw::SearchHitType::Task => "task",
                 asanadw::SearchHitType::Comment => "comment",
                 asanadw::SearchHitType::Project => "project",
+                asanadw::SearchHitType::Portfolio => "portfolio",
                 asanadw::SearchHitType::CustomField => "field",
             };
             println!("  [{type_label}] {} ({})", hit.title, hit.gid);

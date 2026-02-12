@@ -127,9 +127,8 @@ pub fn upsert_task(conn: &Connection, task: &asanaclient::Task) -> Result<(), ru
     let days_to_complete = compute_days_to_complete(created_at, task.completed_at.as_deref());
     let is_overdue = compute_is_overdue(task.completed, task.due_on.as_deref());
 
-    // Use INSERT OR REPLACE — CASCADE deletes will clean up bridge/child rows
     conn.execute(
-        "INSERT OR REPLACE INTO fact_tasks (
+        "INSERT INTO fact_tasks (
             task_gid, name, notes, notes_html, assignee_gid,
             is_completed, completed_at, completed_date_key,
             due_on, due_at, start_on, start_at,
@@ -139,7 +138,18 @@ pub fn upsert_task(conn: &Connection, task: &asanaclient::Task) -> Result<(), ru
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
             ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, datetime('now')
-        )",
+        )
+        ON CONFLICT(task_gid) DO UPDATE SET
+            name=excluded.name, notes=excluded.notes, notes_html=excluded.notes_html,
+            assignee_gid=excluded.assignee_gid, is_completed=excluded.is_completed,
+            completed_at=excluded.completed_at, completed_date_key=excluded.completed_date_key,
+            due_on=excluded.due_on, due_at=excluded.due_at, start_on=excluded.start_on,
+            start_at=excluded.start_at, created_at=excluded.created_at,
+            created_date_key=excluded.created_date_key, modified_at=excluded.modified_at,
+            parent_gid=excluded.parent_gid, is_subtask=excluded.is_subtask,
+            num_subtasks=excluded.num_subtasks, num_likes=excluded.num_likes,
+            days_to_complete=excluded.days_to_complete, is_overdue=excluded.is_overdue,
+            permalink_url=excluded.permalink_url, cached_at=excluded.cached_at",
         params![
             task.gid,
             task.name,
@@ -166,27 +176,41 @@ pub fn upsert_task(conn: &Connection, task: &asanaclient::Task) -> Result<(), ru
         ],
     )?;
 
-    // Upsert task memberships (project associations)
+    // Clean stale bridge rows (previously handled by CASCADE from INSERT OR REPLACE)
+    conn.execute(
+        "DELETE FROM bridge_task_projects WHERE task_gid = ?1",
+        params![task.gid],
+    )?;
+    conn.execute(
+        "DELETE FROM bridge_task_tags WHERE task_gid = ?1",
+        params![task.gid],
+    )?;
+    conn.execute(
+        "DELETE FROM fact_task_custom_fields WHERE task_gid = ?1",
+        params![task.gid],
+    )?;
+
+    // Insert task memberships (project associations)
     for membership in &task.memberships {
         let section_gid = membership.section.as_ref().map(|s| s.gid.as_str());
         conn.execute(
-            "INSERT OR REPLACE INTO bridge_task_projects (task_gid, project_gid, section_gid)
+            "INSERT INTO bridge_task_projects (task_gid, project_gid, section_gid)
              VALUES (?1, ?2, ?3)",
             params![task.gid, membership.project.gid, section_gid],
         )?;
     }
 
-    // Upsert tags
+    // Insert tags
     for tag in &task.tags {
         let tag_name = tag.name.as_deref().unwrap_or("");
         conn.execute(
-            "INSERT OR REPLACE INTO bridge_task_tags (task_gid, tag_gid, tag_name)
+            "INSERT INTO bridge_task_tags (task_gid, tag_gid, tag_name)
              VALUES (?1, ?2, ?3)",
             params![task.gid, tag.gid, tag_name],
         )?;
     }
 
-    // Upsert custom fields
+    // Insert custom fields
     upsert_custom_fields(conn, &task.gid, &task.custom_fields)?;
 
     Ok(())
@@ -328,10 +352,15 @@ pub fn upsert_comment(
     let created_date_key = date_key_from_iso(created_at);
 
     conn.execute(
-        "INSERT OR REPLACE INTO fact_comments (
+        "INSERT INTO fact_comments (
             comment_gid, task_gid, author_gid, text, html_text,
             story_type, created_at, created_date_key, cached_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'))",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'))
+        ON CONFLICT(comment_gid) DO UPDATE SET
+            task_gid=excluded.task_gid, author_gid=excluded.author_gid,
+            text=excluded.text, html_text=excluded.html_text,
+            story_type=excluded.story_type, created_at=excluded.created_at,
+            created_date_key=excluded.created_date_key, cached_at=excluded.cached_at",
         params![
             story.gid,
             task_gid,

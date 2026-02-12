@@ -9,6 +9,7 @@ pub enum SearchHitType {
     Task,
     Comment,
     Project,
+    Portfolio,
     CustomField,
 }
 
@@ -53,6 +54,13 @@ pub struct SearchResults {
 
 /// Search across all FTS-indexed content.
 pub async fn search(db: &Database, query: &str, options: &SearchOptions) -> Result<SearchResults> {
+    if query.trim().is_empty() {
+        return Ok(SearchResults {
+            query: query.to_string(),
+            hits: Vec::new(),
+            total: 0,
+        });
+    }
     let query_owned = query.to_string();
     let options_limit = options.limit.unwrap_or(50);
     let hit_type_filter = options.hit_type.clone();
@@ -183,6 +191,34 @@ pub async fn search(db: &Database, query: &str, options: &SearchOptions) -> Resu
                         snippet: snippet.unwrap_or_default(),
                         rank: row.get(3)?,
                         asana_url: stored_url.or_else(|| Some(format!("https://app.asana.com/0/{gid}"))),
+                    })
+                })?;
+                for row in rows {
+                    all_hits.push(row?);
+                }
+            }
+
+            // Search portfolios
+            if hit_type_filter.is_none() || hit_type_filter == Some(SearchHitType::Portfolio) {
+                let sql =
+                    "SELECT p.portfolio_gid, p.name, snippet(portfolios_fts, 1, '<b>', '</b>', '...', 32) as snip, portfolios_fts.rank, p.permalink_url
+                     FROM portfolios_fts
+                     JOIN dim_portfolios p ON p.rowid = portfolios_fts.rowid
+                     WHERE portfolios_fts MATCH ?1
+                     ORDER BY rank LIMIT ?2";
+                let mut stmt = conn.prepare(sql)?;
+                let rows = stmt.query_map(rusqlite::params![query_owned, options_limit], |row| {
+                    let gid: String = row.get(0)?;
+                    let snippet: Option<String> = row.get(2)?;
+                    let stored_url: Option<String> = row.get(4)?;
+                    Ok(SearchHit {
+                        hit_type: SearchHitType::Portfolio,
+                        gid: gid.clone(),
+                        task_gid: None,
+                        title: row.get(1)?,
+                        snippet: snippet.unwrap_or_default(),
+                        rank: row.get(3)?,
+                        asana_url: stored_url,
                     })
                 })?;
                 for row in rows {
