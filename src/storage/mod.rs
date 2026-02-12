@@ -67,6 +67,7 @@ impl Database {
                 M::up(include_str!("migrations/002_add_permalink_urls.sql")),
                 M::up(include_str!("migrations/003_add_enum_options.sql")),
                 M::up(include_str!("migrations/004_add_event_sync_tokens.sql")),
+                M::up(include_str!("migrations/005_add_portfolio_portfolios.sql")),
             ]);
             migrations.to_latest(conn).map_err(|e| e.to_string())?;
             Ok::<(), String>(())

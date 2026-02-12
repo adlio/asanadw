@@ -781,7 +781,16 @@ pub async fn sync_team(
     ))
 }
 
-/// Sync a portfolio: fetch items and sync each project.
+/// Maximum nesting depth for recursive portfolio sync. The root portfolio
+/// is at depth 0, so a limit of 5 allows up to 6 total hierarchy levels.
+const MAX_PORTFOLIO_DEPTH: u32 = 5;
+
+/// Sync a portfolio and all its contents (projects and nested sub-portfolios).
+///
+/// Recursively descends into child portfolios up to 5 nesting levels
+/// (6 total hierarchy levels). Each child portfolio's metadata, status
+/// updates, and contained projects are synced. Sub-portfolios that exceed
+/// the depth limit are skipped with a warning.
 pub async fn sync_portfolio(
     db: &Database,
     client: &asanaclient::Client,
@@ -789,79 +798,140 @@ pub async fn sync_portfolio(
     options: &SyncOptions,
     progress: &dyn SyncProgress,
 ) -> Result<SyncReport> {
-    let entity_key = format!("portfolio:{portfolio_gid}");
+    sync_portfolio_recursive(db, client, portfolio_gid, options, progress, 0).await
+}
 
-    let portfolio = retry_api!(client.portfolios().get(portfolio_gid))?;
-    db.writer()
-        .call({
-            let portfolio = portfolio.clone();
-            move |conn| {
-                // Insert referenced owner before the portfolio (FK constraints)
-                if let Some(ref owner) = portfolio.owner {
-                    repository::upsert_user_minimal(conn, &owner.gid, owner.name.as_deref())?;
+/// Recursive implementation of portfolio sync with depth tracking.
+/// Uses a boxed future to allow async recursion.
+fn sync_portfolio_recursive<'a>(
+    db: &'a Database,
+    client: &'a asanaclient::Client,
+    portfolio_gid: &'a str,
+    options: &'a SyncOptions,
+    progress: &'a dyn SyncProgress,
+    depth: u32,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<SyncReport>> + Send + 'a>> {
+    Box::pin(async move {
+        let entity_key = format!("portfolio:{portfolio_gid}");
+
+        if depth > MAX_PORTFOLIO_DEPTH {
+            log::warn!(
+            "Portfolio {portfolio_gid} exceeds max nesting depth ({MAX_PORTFOLIO_DEPTH}), skipping"
+        );
+            return Ok(SyncReport {
+                entity_key,
+                status: SyncStatus::Failed,
+                items_synced: 0,
+                items_failed: 0,
+                batches_completed: 0,
+                batches_total: 0,
+                error: Some(format!(
+                    "exceeded max portfolio nesting depth ({MAX_PORTFOLIO_DEPTH})"
+                )),
+            });
+        }
+
+        let portfolio = retry_api!(client.portfolios().get(portfolio_gid))?;
+        db.writer()
+            .call({
+                let portfolio = portfolio.clone();
+                move |conn| {
+                    // Insert referenced owner before the portfolio (FK constraints)
+                    if let Some(ref owner) = portfolio.owner {
+                        repository::upsert_user_minimal(conn, &owner.gid, owner.name.as_deref())?;
+                    }
+                    repository::upsert_portfolio(conn, &portfolio)?;
+                    Ok::<(), rusqlite::Error>(())
                 }
-                repository::upsert_portfolio(conn, &portfolio)?;
-                Ok::<(), rusqlite::Error>(())
+            })
+            .await?;
+
+        // Fetch and store status updates for the portfolio (non-fatal if unavailable)
+        match retry_api!(client.portfolios().status_updates(portfolio_gid)) {
+            Ok(statuses) => {
+                progress.on_status_updates_synced(&entity_key, statuses.len());
+                upsert_status_updates(db, portfolio_gid, "portfolio", &statuses).await?;
             }
-        })
-        .await?;
-
-    // Fetch and store status updates for the portfolio (non-fatal if unavailable)
-    match retry_api!(client.portfolios().status_updates(portfolio_gid)) {
-        Ok(statuses) => {
-            progress.on_status_updates_synced(&entity_key, statuses.len());
-            upsert_status_updates(db, portfolio_gid, "portfolio", &statuses).await?;
-        }
-        Err(e) => {
-            log::warn!("Failed to fetch status updates for {entity_key}: {e}");
-        }
-    }
-
-    // Fetch portfolio items (projects)
-    let items = retry_api!(client.portfolios().items(portfolio_gid))?;
-
-    let mut total_synced: u64 = 0;
-    let mut total_failed: u64 = 0;
-    let mut project_count: u32 = 0;
-
-    for item in &items {
-        let gid = &item.gid;
-        let resource_type = item.resource_type.as_str();
-
-        if resource_type == "project" {
-            project_count += 1;
-            match sync_project(db, client, gid, options, progress).await {
-                Ok(report) => {
-                    total_synced += report.items_synced;
-                    // Link portfolio to project only after project exists
-                    db.writer()
-                        .call({
-                            let portfolio_gid = portfolio_gid.to_string();
-                            let project_gid = gid.clone();
-                            move |conn| {
-                                repository::upsert_portfolio_project(
-                                    conn,
-                                    &portfolio_gid,
-                                    &project_gid,
-                                )?;
-                                Ok::<(), rusqlite::Error>(())
-                            }
-                        })
-                        .await?;
-                }
-                Err(e) => {
-                    log::error!("Failed to sync project {gid} in portfolio: {e}");
-                    total_failed += 1;
-                }
+            Err(e) => {
+                log::warn!("Failed to fetch status updates for {entity_key}: {e}");
             }
         }
-    }
 
-    Ok(SyncReport::from_counts(
-        entity_key,
-        total_synced,
-        total_failed,
-        project_count.saturating_sub(total_failed as u32),
-        project_count,
-    ))
+        // Fetch portfolio items (projects and sub-portfolios)
+        let items = retry_api!(client.portfolios().items(portfolio_gid))?;
+
+        let mut total_synced: u64 = 0;
+        let mut total_failed: u64 = 0;
+        let mut child_count: u32 = 0;
+
+        for item in &items {
+            let gid = &item.gid;
+            let resource_type = item.resource_type.as_str();
+
+            match resource_type {
+                "project" => {
+                    child_count += 1;
+                    match sync_project(db, client, gid, options, progress).await {
+                        Ok(report) => {
+                            total_synced += report.items_synced;
+                            db.writer()
+                                .call({
+                                    let portfolio_gid = portfolio_gid.to_string();
+                                    let project_gid = gid.clone();
+                                    move |conn| {
+                                        repository::upsert_portfolio_project(
+                                            conn,
+                                            &portfolio_gid,
+                                            &project_gid,
+                                        )
+                                    }
+                                })
+                                .await?;
+                        }
+                        Err(e) => {
+                            log::error!("Failed to sync project {gid} in portfolio: {e}");
+                            total_failed += 1;
+                        }
+                    }
+                }
+                "portfolio" => {
+                    child_count += 1;
+                    match sync_portfolio_recursive(db, client, gid, options, progress, depth + 1)
+                        .await
+                    {
+                        Ok(report) => {
+                            total_synced += report.items_synced;
+                            total_failed += report.items_failed;
+                            db.writer()
+                                .call({
+                                    let parent_gid = portfolio_gid.to_string();
+                                    let child_gid = gid.clone();
+                                    move |conn| {
+                                        repository::upsert_portfolio_portfolio(
+                                            conn,
+                                            &parent_gid,
+                                            &child_gid,
+                                        )
+                                    }
+                                })
+                                .await?;
+                        }
+                        Err(e) => {
+                            log::error!("Failed to sync sub-portfolio {gid} in portfolio: {e}");
+                            total_failed += 1;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(SyncReport::from_counts(
+            entity_key,
+            total_synced,
+            total_failed,
+            child_count.saturating_sub(total_failed as u32),
+            child_count,
+        ))
+    })
 }

@@ -479,6 +479,19 @@ pub fn upsert_portfolio_project(
     Ok(())
 }
 
+pub fn upsert_portfolio_portfolio(
+    conn: &Connection,
+    parent_portfolio_gid: &str,
+    child_portfolio_gid: &str,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "INSERT OR REPLACE INTO bridge_portfolio_portfolios (parent_portfolio_gid, child_portfolio_gid)
+         VALUES (?1, ?2)",
+        params![parent_portfolio_gid, child_portfolio_gid],
+    )
+    .map(|_| ())
+}
+
 // ── Monitored Entities ─────────────────────────────────────────────
 
 pub fn add_monitored_entity(
