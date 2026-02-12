@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-02-12
+
+### Added
+
+- Portfolio full-text search — portfolios now appear in search results alongside tasks, comments, and projects
+- Multi-word search queries no longer require quoting (e.g. `asanadw search VX Team Portfolio`)
+
+### Fixed
+
+- FTS triggers now wrap nullable columns with COALESCE to prevent silent index corruption
+- Task and comment upserts use ON CONFLICT DO UPDATE instead of INSERT OR REPLACE to avoid unnecessary FTS delete+insert cycles
+
 ## [0.1.1] - 2026-02-11
 
 ### Added
@@ -36,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Monitor system for tracking entities to sync
 - Scheduling guidance for cron and launchd
 
-[Unreleased]: https://github.com/adlio/asanadw/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/adlio/asanadw/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/adlio/asanadw/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/adlio/asanadw/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/adlio/asanadw/releases/tag/v0.1.0
