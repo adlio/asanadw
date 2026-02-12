@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-02-11
+
+### Added
+
+- Nested portfolio support — portfolios containing sub-portfolios are now recursively synced (up to 6 hierarchy levels)
+- New `bridge_portfolio_portfolios` table linking parent and child portfolios
+- Incremental sync via Events API for all resource types (sections, status updates, project metadata)
+- Status update syncing for projects and portfolios
+
+### Fixed
+
+- Handle status update fetch failures gracefully instead of aborting sync
+- Empty search queries now return empty results instead of erroring
+
 ## [0.1.0] - 2026-02-08
 
 ### Added
@@ -22,5 +36,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Monitor system for tracking entities to sync
 - Scheduling guidance for cron and launchd
 
-[Unreleased]: https://github.com/adlio/asanadw/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/adlio/asanadw/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/adlio/asanadw/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/adlio/asanadw/releases/tag/v0.1.0
