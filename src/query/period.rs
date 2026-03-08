@@ -137,7 +137,7 @@ impl Period {
             Period::Quarter(y, q) => format!("{y}-Q{q}"),
             Period::Month(y, m) => format!("{y}-{m:02}"),
             Period::Week(y, w) => format!("{y}-W{w:02}"),
-            Period::Rolling(n, _) => format!("{n}d"),
+            Period::Rolling(n, d) => format!("{n}d_{}", d.format("%Y-%m-%d")),
             Period::YearToDate(y) => format!("{y}-ytd"),
             Period::HalfToDate(y, h) => format!("{y}-H{h}-td"),
             Period::QuarterToDate(y, q) => format!("{y}-Q{q}-td"),
@@ -234,8 +234,10 @@ impl Period {
             }
             Period::Week(y, w) => {
                 if *w == 1 {
-                    // Last week of previous year — approximate
-                    Period::Week(y - 1, 52)
+                    // Compute the last ISO week of the prior year
+                    let dec28 = NaiveDate::from_ymd_opt(y - 1, 12, 28).unwrap();
+                    let last_week = dec28.iso_week().week() as u8;
+                    Period::Week(y - 1, last_week)
                 } else {
                     Period::Week(*y, w - 1)
                 }
@@ -265,7 +267,10 @@ impl Period {
             }
             Period::WeekToDate(y, w) => {
                 if *w == 1 {
-                    Period::WeekToDate(y - 1, 52)
+                    // Compute the last ISO week of the prior year
+                    let dec28 = NaiveDate::from_ymd_opt(y - 1, 12, 28).unwrap();
+                    let last_week = dec28.iso_week().week() as u8;
+                    Period::WeekToDate(y - 1, last_week)
                 } else {
                     Period::WeekToDate(*y, w - 1)
                 }
@@ -446,6 +451,36 @@ mod tests {
         let (ps, pe) = prior.date_range();
         assert_eq!(ps, NaiveDate::from_ymd_opt(2025, 10, 1).unwrap());
         assert_eq!(pe, NaiveDate::from_ymd_opt(2025, 11, 7).unwrap());
+    }
+
+    #[test]
+    fn test_previous_week_iso53() {
+        // 2024 has 52 ISO weeks (2024-12-28 is a Saturday in week 52)
+        assert_eq!(Period::Week(2025, 1).previous(), Period::Week(2024, 52));
+
+        // 2020 has 53 ISO weeks (2020-12-28 is a Monday in week 53)
+        assert_eq!(Period::Week(2021, 1).previous(), Period::Week(2020, 53));
+
+        // WeekToDate follows the same logic
+        assert_eq!(
+            Period::WeekToDate(2021, 1).previous(),
+            Period::WeekToDate(2020, 53)
+        );
+        assert_eq!(
+            Period::WeekToDate(2025, 1).previous(),
+            Period::WeekToDate(2024, 52)
+        );
+    }
+
+    #[test]
+    fn test_rolling_key_includes_date() {
+        let d1 = NaiveDate::from_ymd_opt(2025, 3, 1).unwrap();
+        let d2 = NaiveDate::from_ymd_opt(2025, 3, 15).unwrap();
+        let k1 = Period::Rolling(30, d1).to_key();
+        let k2 = Period::Rolling(30, d2).to_key();
+        assert_ne!(k1, k2);
+        assert_eq!(k1, "30d_2025-03-01");
+        assert_eq!(k2, "30d_2025-03-15");
     }
 
     #[test]
