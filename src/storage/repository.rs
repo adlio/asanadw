@@ -127,9 +127,9 @@ pub fn upsert_task(conn: &Connection, task: &asanaclient::Task) -> Result<(), ru
     let days_to_complete = compute_days_to_complete(created_at, task.completed_at.as_deref());
     let is_overdue = compute_is_overdue(task.completed, task.due_on.as_deref());
 
-    // Use INSERT OR REPLACE — CASCADE deletes will clean up bridge/child rows
+    // Use ON CONFLICT to preserve child rows (comments, custom fields, bridge rows)
     conn.execute(
-        "INSERT OR REPLACE INTO fact_tasks (
+        "INSERT INTO fact_tasks (
             task_gid, name, notes, notes_html, assignee_gid,
             is_completed, completed_at, completed_date_key,
             due_on, due_at, start_on, start_at,
@@ -139,7 +139,17 @@ pub fn upsert_task(conn: &Connection, task: &asanaclient::Task) -> Result<(), ru
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
             ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, datetime('now')
-        )",
+        ) ON CONFLICT(task_gid) DO UPDATE SET
+            name=excluded.name, notes=excluded.notes, notes_html=excluded.notes_html,
+            assignee_gid=excluded.assignee_gid, is_completed=excluded.is_completed,
+            completed_at=excluded.completed_at, completed_date_key=excluded.completed_date_key,
+            due_on=excluded.due_on, due_at=excluded.due_at, start_on=excluded.start_on,
+            start_at=excluded.start_at, created_at=excluded.created_at,
+            created_date_key=excluded.created_date_key, modified_at=excluded.modified_at,
+            parent_gid=excluded.parent_gid, is_subtask=excluded.is_subtask,
+            num_subtasks=excluded.num_subtasks, num_likes=excluded.num_likes,
+            days_to_complete=excluded.days_to_complete, is_overdue=excluded.is_overdue,
+            permalink_url=excluded.permalink_url, cached_at=excluded.cached_at",
         params![
             task.gid,
             task.name,
@@ -166,17 +176,27 @@ pub fn upsert_task(conn: &Connection, task: &asanaclient::Task) -> Result<(), ru
         ],
     )?;
 
-    // Upsert task memberships (project associations)
-    for membership in &task.memberships {
-        let section_gid = membership.section.as_ref().map(|s| s.gid.as_str());
+    // Replace task memberships (project associations) — delete stale then insert current
+    if !task.memberships.is_empty() {
         conn.execute(
-            "INSERT OR REPLACE INTO bridge_task_projects (task_gid, project_gid, section_gid)
-             VALUES (?1, ?2, ?3)",
-            params![task.gid, membership.project.gid, section_gid],
+            "DELETE FROM bridge_task_projects WHERE task_gid = ?1",
+            params![task.gid],
         )?;
+        for membership in &task.memberships {
+            let section_gid = membership.section.as_ref().map(|s| s.gid.as_str());
+            conn.execute(
+                "INSERT OR REPLACE INTO bridge_task_projects (task_gid, project_gid, section_gid)
+                 VALUES (?1, ?2, ?3)",
+                params![task.gid, membership.project.gid, section_gid],
+            )?;
+        }
     }
 
-    // Upsert tags
+    // Replace tags — delete stale then insert current
+    conn.execute(
+        "DELETE FROM bridge_task_tags WHERE task_gid = ?1",
+        params![task.gid],
+    )?;
     for tag in &task.tags {
         let tag_name = tag.name.as_deref().unwrap_or("");
         conn.execute(
@@ -328,10 +348,15 @@ pub fn upsert_comment(
     let created_date_key = date_key_from_iso(created_at);
 
     conn.execute(
-        "INSERT OR REPLACE INTO fact_comments (
+        "INSERT INTO fact_comments (
             comment_gid, task_gid, author_gid, text, html_text,
             story_type, created_at, created_date_key, cached_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'))",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'))
+        ON CONFLICT(comment_gid) DO UPDATE SET
+            task_gid=excluded.task_gid, author_gid=excluded.author_gid,
+            text=excluded.text, html_text=excluded.html_text,
+            story_type=excluded.story_type, created_at=excluded.created_at,
+            created_date_key=excluded.created_date_key, cached_at=excluded.cached_at",
         params![
             story.gid,
             task_gid,
@@ -365,11 +390,17 @@ pub fn upsert_status_update(
     let created_date_key = date_key_from_iso(created_at);
 
     conn.execute(
-        "INSERT OR REPLACE INTO fact_status_updates (
+        "INSERT INTO fact_status_updates (
             status_gid, parent_gid, parent_type, author_gid,
             title, text, html_text, status_type,
             created_at, created_date_key, cached_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, datetime('now'))",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, datetime('now'))
+        ON CONFLICT(status_gid) DO UPDATE SET
+            parent_gid=excluded.parent_gid, parent_type=excluded.parent_type,
+            author_gid=excluded.author_gid, title=excluded.title,
+            text=excluded.text, html_text=excluded.html_text,
+            status_type=excluded.status_type, created_at=excluded.created_at,
+            created_date_key=excluded.created_date_key, cached_at=excluded.cached_at",
         params![
             status.gid,
             parent_gid,
@@ -724,6 +755,29 @@ fn compute_is_overdue(completed: bool, due_on: Option<&str>) -> bool {
     today > due_date
 }
 
+// ── Dependencies ────────────────────────────────────────────────
+
+pub fn upsert_task_dependency(
+    conn: &Connection,
+    task_gid: &str,
+    depends_on_gid: &str,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "INSERT OR IGNORE INTO bridge_task_dependencies (task_gid, depends_on_gid)
+         VALUES (?1, ?2)",
+        params![task_gid, depends_on_gid],
+    )?;
+    Ok(())
+}
+
+pub fn delete_task_dependencies(conn: &Connection, task_gid: &str) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "DELETE FROM bridge_task_dependencies WHERE task_gid = ?1",
+        params![task_gid],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -983,6 +1037,271 @@ mod tests {
                 // Get token for entity that doesn't exist
                 let token = get_event_sync_token(conn, "project:999")?;
                 assert_eq!(token, None);
+
+                Ok::<(), rusqlite::Error>(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_upsert_task_preserves_comments() {
+        let db = Database::open_memory().await.unwrap();
+
+        db.writer()
+            .call(|conn| {
+                // Insert a user (needed for FK)
+                let user = asanaclient::User {
+                    gid: "u1".to_string(),
+                    name: "Alice".to_string(),
+                    email: Some("alice@example.com".to_string()),
+                    photo: None,
+                };
+                upsert_user(conn, &user)?;
+
+                // Build a minimal task
+                let task = asanaclient::Task {
+                    gid: "t1".to_string(),
+                    name: "My Task".to_string(),
+                    resource_type: None,
+                    completed: false,
+                    completed_at: None,
+                    completed_by: None,
+                    assignee: Some(asanaclient::types::UserRef {
+                        gid: "u1".to_string(),
+                        name: Some("Alice".to_string()),
+                        email: None,
+                    }),
+                    due_on: None,
+                    due_at: None,
+                    start_on: None,
+                    start_at: None,
+                    notes: Some("notes".to_string()),
+                    html_notes: None,
+                    created_at: Some("2025-01-01T00:00:00Z".to_string()),
+                    created_by: None,
+                    modified_at: None,
+                    permalink_url: None,
+                    parent: None,
+                    num_likes: 0,
+                    num_subtasks: 0,
+                    liked: false,
+                    projects: vec![],
+                    workspace: None,
+                    tags: vec![],
+                    memberships: vec![],
+                    assignee_section: None,
+                    custom_fields: vec![],
+                };
+
+                // Upsert the task
+                upsert_task(conn, &task)?;
+
+                // Insert a comment for this task
+                let story = asanaclient::Story {
+                    gid: "c1".to_string(),
+                    created_at: Some("2025-01-02T00:00:00Z".to_string()),
+                    created_by: Some(asanaclient::types::UserRef {
+                        gid: "u1".to_string(),
+                        name: Some("Alice".to_string()),
+                        email: None,
+                    }),
+                    resource_subtype: Some(asanaclient::types::StoryType::CommentAdded),
+                    text: Some("Hello world".to_string()),
+                    html_text: None,
+                    is_pinned: false,
+                    is_edited: false,
+                    target: None,
+                    num_likes: 0,
+                    liked: false,
+                };
+                upsert_comment(conn, "t1", &story)?;
+
+                // Verify comment exists
+                let count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM fact_comments WHERE task_gid = 't1'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(count, 1);
+
+                // Re-upsert the same task (simulating a re-sync)
+                upsert_task(conn, &task)?;
+
+                // Comment must still exist
+                let count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM fact_comments WHERE task_gid = 't1'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(count, 1, "comment was cascade-deleted by task upsert");
+
+                Ok::<(), rusqlite::Error>(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_upsert_task_preserves_bridge_and_custom_fields() {
+        let db = Database::open_memory().await.unwrap();
+
+        db.writer()
+            .call(|conn| {
+                // Setup: user, project, custom field definition
+                let user = asanaclient::User {
+                    gid: "u1".to_string(),
+                    name: "Bob".to_string(),
+                    email: None,
+                    photo: None,
+                };
+                upsert_user(conn, &user)?;
+
+                // Insert a project (needed for bridge_task_projects FK)
+                conn.execute(
+                    "INSERT INTO dim_projects (project_gid, name, workspace_gid, is_archived, is_template, cached_at)
+                     VALUES ('p1', 'Project', 'w1', 0, 0, datetime('now'))",
+                    [],
+                )?;
+
+                // Insert a custom field definition
+                conn.execute(
+                    "INSERT INTO dim_custom_fields (field_gid, name, field_type, cached_at)
+                     VALUES ('cf1', 'Priority', 'enum', datetime('now'))",
+                    [],
+                )?;
+
+                // Build a task
+                let task = asanaclient::Task {
+                    gid: "t2".to_string(),
+                    name: "Task Two".to_string(),
+                    resource_type: None,
+                    completed: false,
+                    completed_at: None,
+                    completed_by: None,
+                    assignee: None,
+                    due_on: None,
+                    due_at: None,
+                    start_on: None,
+                    start_at: None,
+                    notes: None,
+                    html_notes: None,
+                    created_at: Some("2025-02-01T00:00:00Z".to_string()),
+                    created_by: None,
+                    modified_at: None,
+                    permalink_url: None,
+                    parent: None,
+                    num_likes: 0,
+                    num_subtasks: 0,
+                    liked: false,
+                    projects: vec![],
+                    workspace: None,
+                    tags: vec![],
+                    memberships: vec![],
+                    assignee_section: None,
+                    custom_fields: vec![],
+                };
+
+                upsert_task(conn, &task)?;
+
+                // Insert bridge_task_projects row
+                conn.execute(
+                    "INSERT INTO bridge_task_projects (task_gid, project_gid) VALUES ('t2', 'p1')",
+                    [],
+                )?;
+
+                // Insert fact_task_custom_fields row
+                conn.execute(
+                    "INSERT INTO fact_task_custom_fields (task_gid, field_gid, display_value)
+                     VALUES ('t2', 'cf1', 'High')",
+                    [],
+                )?;
+
+                // Verify rows exist
+                let bridge_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM bridge_task_projects WHERE task_gid = 't2'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(bridge_count, 1);
+
+                let cf_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM fact_task_custom_fields WHERE task_gid = 't2'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(cf_count, 1);
+
+                // Re-upsert the task
+                upsert_task(conn, &task)?;
+
+                // Bridge row must still exist
+                let bridge_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM bridge_task_projects WHERE task_gid = 't2'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(bridge_count, 1, "bridge_task_projects row was cascade-deleted");
+
+                // Custom field row must still exist
+                let cf_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM fact_task_custom_fields WHERE task_gid = 't2'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(cf_count, 1, "fact_task_custom_fields row was cascade-deleted");
+
+                Ok::<(), rusqlite::Error>(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_task_dependency_round_trip() {
+        let db = Database::open_memory().await.unwrap();
+        db.writer()
+            .call(|conn| {
+                // Insert tasks first (FK constraint)
+                conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+                conn.execute(
+                    "INSERT INTO fact_tasks (task_gid, name, created_at, created_date_key, is_subtask, is_overdue, cached_at)
+                     VALUES ('t1', 'Task 1', '2025-01-01', '2025-01-01', 0, 0, datetime('now'))",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO fact_tasks (task_gid, name, created_at, created_date_key, is_subtask, is_overdue, cached_at)
+                     VALUES ('t2', 'Task 2', '2025-01-01', '2025-01-01', 0, 0, datetime('now'))",
+                    [],
+                )?;
+                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+
+                upsert_task_dependency(conn, "t1", "t2")?;
+
+                let count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM bridge_task_dependencies WHERE task_gid = 't1'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(count, 1);
+
+                // Upsert again (should be idempotent)
+                upsert_task_dependency(conn, "t1", "t2")?;
+                let count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM bridge_task_dependencies WHERE task_gid = 't1'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(count, 1);
+
+                // Delete dependencies
+                delete_task_dependencies(conn, "t1")?;
+                let count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM bridge_task_dependencies WHERE task_gid = 't1'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(count, 0);
 
                 Ok::<(), rusqlite::Error>(())
             })
