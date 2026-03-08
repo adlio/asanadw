@@ -42,6 +42,9 @@ pub struct QueryBuilder {
     has_assignee: Option<bool>,
     is_subtask: Option<bool>,
     tag_name: Option<String>,
+    custom_field_filter: Option<(String, String)>,
+    modified_after: Option<String>,
+    modified_before: Option<String>,
     limit: Option<u32>,
     order_by: Option<String>,
     order_desc: bool,
@@ -124,6 +127,21 @@ impl QueryBuilder {
 
     pub fn tag(mut self, name: &str) -> Self {
         self.tag_name = Some(name.to_string());
+        self
+    }
+
+    pub fn custom_field(mut self, field_name: &str, value: &str) -> Self {
+        self.custom_field_filter = Some((field_name.to_string(), value.to_string()));
+        self
+    }
+
+    pub fn modified_after(mut self, date: &str) -> Self {
+        self.modified_after = Some(date.to_string());
+        self
+    }
+
+    pub fn modified_before(mut self, date: &str) -> Self {
+        self.modified_before = Some(date.to_string());
         self
     }
 
@@ -239,8 +257,9 @@ impl QueryBuilder {
         // Base query
         let select = "SELECT t.task_gid, t.name, t.assignee_gid, u.name as assignee_name,
                 t.is_completed, t.completed_at, t.due_on, t.created_at, t.modified_at,
-                p.name as project_name, s.name as section_name,
-                t.is_overdue, t.days_to_complete, t.num_subtasks, t.num_likes,
+                GROUP_CONCAT(DISTINCT p.name) as project_name, s.name as section_name,
+                CASE WHEN t.due_on < date('now') AND t.due_on IS NOT NULL AND t.is_completed = 0 THEN 1 ELSE 0 END as is_overdue,
+                t.days_to_complete, t.num_subtasks, t.num_likes,
                 t.permalink_url
             FROM fact_tasks t
             LEFT JOIN dim_users u ON u.user_gid = t.assignee_gid
@@ -264,11 +283,9 @@ impl QueryBuilder {
             param_idx += 1;
         }
 
-        // Team filter (join through bridge)
+        // Team filter (through project's team)
         if let Some(ref gid) = self.team_gid {
-            joins.push(format!(
-                "JOIN bridge_team_members btm ON btm.user_gid = t.assignee_gid AND btm.team_gid = ?{param_idx}"
-            ));
+            wheres.push(format!("p.team_gid = ?{param_idx}"));
             params.push(Box::new(gid.clone()));
             param_idx += 1;
         }
@@ -287,11 +304,19 @@ impl QueryBuilder {
             param_idx += 1;
         }
 
-        // Overdue filter
+        // Overdue filter — computed from due_on to avoid stale stored column
         if let Some(overdue) = self.overdue {
-            wheres.push(format!("t.is_overdue = ?{param_idx}"));
-            params.push(Box::new(overdue as i32));
-            param_idx += 1;
+            if overdue {
+                wheres.push(
+                    "t.due_on < date('now') AND t.due_on IS NOT NULL AND t.is_completed = 0"
+                        .to_string(),
+                );
+            } else {
+                wheres.push(
+                    "(t.due_on >= date('now') OR t.due_on IS NULL OR t.is_completed = 1)"
+                        .to_string(),
+                );
+            }
         }
 
         // Date range filters
@@ -351,6 +376,31 @@ impl QueryBuilder {
             param_idx += 1;
         }
 
+        // Custom field filter
+        if let Some((ref field_name, ref value)) = self.custom_field_filter {
+            joins.push(format!(
+                "JOIN fact_task_custom_fields tcf ON tcf.task_gid = t.task_gid \
+                 JOIN dim_custom_fields dcf ON dcf.field_gid = tcf.field_gid AND dcf.name = ?{param_idx}"
+            ));
+            params.push(Box::new(field_name.clone()));
+            param_idx += 1;
+            wheres.push(format!("tcf.display_value = ?{param_idx}"));
+            params.push(Box::new(value.clone()));
+            param_idx += 1;
+        }
+
+        // Modified date filters
+        if let Some(ref date) = self.modified_after {
+            wheres.push(format!("t.modified_at >= ?{param_idx}"));
+            params.push(Box::new(date.clone()));
+            param_idx += 1;
+        }
+        if let Some(ref date) = self.modified_before {
+            wheres.push(format!("t.modified_at <= ?{param_idx}"));
+            params.push(Box::new(date.clone()));
+            param_idx += 1;
+        }
+
         // Assemble SQL
         let mut sql = select.to_string();
         for join in &joins {
@@ -365,8 +415,25 @@ impl QueryBuilder {
         // GROUP BY to deduplicate when task is in multiple projects
         sql.push_str(" GROUP BY t.task_gid");
 
-        // ORDER BY
-        let order_field = self.order_by.as_deref().unwrap_or("t.modified_at");
+        // ORDER BY — whitelist to prevent SQL injection
+        const ALLOWED_ORDER_FIELDS: &[&str] = &[
+            "t.modified_at",
+            "t.created_at",
+            "t.completed_at",
+            "t.due_on",
+            "t.name",
+            "t.task_gid",
+            "t.is_completed",
+            "t.days_to_complete",
+            "t.num_subtasks",
+            "t.num_likes",
+        ];
+        let requested = self.order_by.as_deref().unwrap_or("t.modified_at");
+        let order_field = if ALLOWED_ORDER_FIELDS.contains(&requested) {
+            requested
+        } else {
+            "t.modified_at"
+        };
         let order_dir = if self.order_desc { "DESC" } else { "ASC" };
         sql.push_str(&format!(" ORDER BY {order_field} {order_dir}"));
 
@@ -382,8 +449,16 @@ impl QueryBuilder {
 }
 
 fn csv_escape(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') {
-        format!("\"{}\"", s.replace('"', "\"\""))
+    let needs_quoting = s.contains(',') || s.contains('"') || s.contains('\n');
+    let is_formula = s.starts_with('=') || s.starts_with('+') || s.starts_with('@');
+
+    if needs_quoting || is_formula {
+        let escaped = s.replace('"', "\"\"");
+        if is_formula {
+            format!("\"'{}\"", escaped)
+        } else {
+            format!("\"{}\"", escaped)
+        }
     } else {
         s.to_string()
     }
@@ -420,9 +495,52 @@ mod tests {
     }
 
     #[test]
+    fn test_overdue_filter_uses_computed_sql() {
+        let builder = QueryBuilder::new().overdue(true);
+        let (sql, params) = builder.build_sql();
+        // Should NOT use the stale stored column
+        assert!(
+            !sql.contains("t.is_overdue = "),
+            "overdue filter should not use stored t.is_overdue column"
+        );
+        // Should use computed expression
+        assert!(sql.contains("t.due_on < date('now')"));
+        assert!(sql.contains("t.due_on IS NOT NULL"));
+        assert!(sql.contains("t.is_completed = 0"));
+        // No bind param needed for overdue
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_not_overdue_filter_uses_computed_sql() {
+        let builder = QueryBuilder::new().overdue(false);
+        let (sql, params) = builder.build_sql();
+        assert!(
+            !sql.contains("t.is_overdue = "),
+            "overdue filter should not use stored t.is_overdue column"
+        );
+        assert!(sql.contains("t.due_on >= date('now') OR t.due_on IS NULL OR t.is_completed = 1"));
+        assert!(params.is_empty());
+    }
+
+    #[test]
     fn test_csv_escape() {
         assert_eq!(csv_escape("hello"), "hello");
         assert_eq!(csv_escape("hello,world"), "\"hello,world\"");
         assert_eq!(csv_escape("say \"hi\""), "\"say \"\"hi\"\"\"");
+    }
+
+    #[test]
+    fn test_csv_escape_formula_injection() {
+        assert_eq!(csv_escape("=SUM(A1)"), "\"'=SUM(A1)\"");
+        assert_eq!(csv_escape("+cmd"), "\"'+cmd\"");
+        assert_eq!(csv_escape("@evil"), "\"'@evil\"");
+    }
+
+    #[test]
+    fn test_csv_escape_dash_not_treated_as_formula() {
+        // Leading dashes are common in task names and should not be escaped
+        assert_eq!(csv_escape("-Fix login bug"), "-Fix login bug");
+        assert_eq!(csv_escape("my-task"), "my-task");
     }
 }
