@@ -133,6 +133,18 @@ enum Commands {
         /// Due before date (YYYY-MM-DD)
         #[arg(long)]
         due_before: Option<String>,
+        /// Filter by tag name
+        #[arg(long)]
+        tag: Option<String>,
+        /// Filter by custom field value (format: "field_name=value")
+        #[arg(long = "custom-field")]
+        custom_field: Option<String>,
+        /// Filter by modified after date (YYYY-MM-DD or ISO datetime)
+        #[arg(long)]
+        modified_after: Option<String>,
+        /// Filter by modified before date (YYYY-MM-DD or ISO datetime)
+        #[arg(long)]
+        modified_before: Option<String>,
         /// Maximum results
         #[arg(long, default_value = "100")]
         limit: u32,
@@ -156,6 +168,18 @@ enum Commands {
         #[command(subcommand)]
         target: MetricsTarget,
     },
+    /// Query status updates for a project or portfolio
+    StatusUpdates {
+        /// Project or portfolio GID
+        #[arg(value_name = "GID")]
+        gid: String,
+        /// Maximum results
+        #[arg(long, default_value = "10")]
+        limit: u32,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Show warehouse status
     Status,
 }
@@ -170,6 +194,9 @@ enum MetricsTarget {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+        /// Show period-over-period comparison
+        #[arg(long)]
+        compare: bool,
     },
     /// Metrics for a user
     User {
@@ -182,6 +209,9 @@ enum MetricsTarget {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+        /// Show period-over-period comparison
+        #[arg(long)]
+        compare: bool,
     },
     /// Metrics for a project
     Project {
@@ -192,6 +222,9 @@ enum MetricsTarget {
         period: String,
         #[arg(long)]
         json: bool,
+        /// Show period-over-period comparison
+        #[arg(long)]
+        compare: bool,
     },
     /// Metrics for a portfolio
     Portfolio {
@@ -202,6 +235,9 @@ enum MetricsTarget {
         period: String,
         #[arg(long)]
         json: bool,
+        /// Show period-over-period comparison
+        #[arg(long)]
+        compare: bool,
     },
     /// Metrics for a team
     Team {
@@ -212,6 +248,9 @@ enum MetricsTarget {
         period: String,
         #[arg(long)]
         json: bool,
+        /// Show period-over-period comparison
+        #[arg(long)]
+        compare: bool,
     },
 }
 
@@ -469,6 +508,10 @@ async fn main() -> anyhow::Result<()> {
             created_before,
             due_after,
             due_before,
+            tag,
+            custom_field,
+            modified_after,
+            modified_before,
             limit,
             json,
             csv,
@@ -499,6 +542,10 @@ async fn main() -> anyhow::Result<()> {
                 created_before.as_deref(),
                 due_after.as_deref(),
                 due_before.as_deref(),
+                tag.as_deref(),
+                custom_field.as_deref(),
+                modified_after.as_deref(),
+                modified_before.as_deref(),
                 limit,
                 json,
                 csv,
@@ -511,6 +558,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Metrics { target } => {
             handle_metrics(&db, target).await?;
+        }
+        Commands::StatusUpdates { gid, limit, json } => {
+            handle_status_updates(&db, &gid, limit, json).await?;
         }
         Commands::Monitor { action } => {
             let client = asanaclient::Client::from_env()?;
@@ -542,6 +592,10 @@ async fn print_status(db: &asanadw::Database) -> anyhow::Result<()> {
                 conn.query_row("SELECT COUNT(*) FROM dim_users", [], |row| row.get(0))?;
             let comments: i64 =
                 conn.query_row("SELECT COUNT(*) FROM fact_comments", [], |row| row.get(0))?;
+            let status_updates: i64 =
+                conn.query_row("SELECT COUNT(*) FROM fact_status_updates", [], |row| {
+                    row.get(0)
+                })?;
             let monitored: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM monitored_entities WHERE sync_enabled = 1",
                 [],
@@ -556,17 +610,26 @@ async fn print_status(db: &asanadw::Database) -> anyhow::Result<()> {
                 )
                 .ok();
 
-            Ok::<_, rusqlite::Error>((tasks, projects, users, comments, monitored, last_sync))
+            Ok::<_, rusqlite::Error>((
+                tasks,
+                projects,
+                users,
+                comments,
+                status_updates,
+                monitored,
+                last_sync,
+            ))
         })
         .await?;
 
-    let (tasks, projects, users, comments, monitored, last_sync) = stats;
+    let (tasks, projects, users, comments, status_updates, monitored, last_sync) = stats;
     println!("Warehouse Status");
-    println!("  Tasks:     {tasks}");
-    println!("  Projects:  {projects}");
-    println!("  Users:     {users}");
-    println!("  Comments:  {comments}");
-    println!("  Monitored: {monitored}");
+    println!("  Tasks:          {tasks}");
+    println!("  Projects:       {projects}");
+    println!("  Users:          {users}");
+    println!("  Comments:       {comments}");
+    println!("  Status Updates: {status_updates}");
+    println!("  Monitored:      {monitored}");
     println!(
         "  Last sync: {}",
         last_sync.unwrap_or_else(|| "never".to_string())
@@ -793,6 +856,10 @@ async fn handle_query(
     created_before: Option<&str>,
     due_after: Option<&str>,
     due_before: Option<&str>,
+    tag: Option<&str>,
+    custom_field: Option<&str>,
+    modified_after: Option<&str>,
+    modified_before: Option<&str>,
     limit: u32,
     json: bool,
     csv: bool,
@@ -836,6 +903,22 @@ async fn handle_query(
     }
     if let Some(d) = due_before {
         builder = builder.due_before(d);
+    }
+    if let Some(t) = tag {
+        builder = builder.tag(t);
+    }
+    if let Some(cf) = custom_field {
+        if let Some((name, value)) = cf.split_once('=') {
+            builder = builder.custom_field(name, value);
+        } else {
+            anyhow::bail!("--custom-field must be in format 'field_name=value'");
+        }
+    }
+    if let Some(d) = modified_after {
+        builder = builder.modified_after(d);
+    }
+    if let Some(d) = modified_before {
+        builder = builder.modified_before(d);
     }
 
     if count {
@@ -1043,7 +1126,11 @@ async fn handle_summarize(db: &asanadw::Database, target: SummarizeTarget) -> an
 
 async fn handle_metrics(db: &asanadw::Database, target: MetricsTarget) -> anyhow::Result<()> {
     match target {
-        MetricsTarget::Me { period, json } => {
+        MetricsTarget::Me {
+            period,
+            json,
+            compare,
+        } => {
             let user_gid = db
                 .reader()
                 .call(|c| asanadw::storage::repository::get_config(c, "user_gid"))
@@ -1064,12 +1151,22 @@ async fn handle_metrics(db: &asanadw::Database, target: MetricsTarget) -> anyhow
                 print_throughput(&m.throughput);
                 print_lead_time(&m.lead_time);
                 print_collaboration(&m.collaboration);
+                if compare {
+                    let prev = p.previous();
+                    let prev_m =
+                        asanadw::metrics::compute_user_metrics(db, &user_gid, &prev).await?;
+                    println!("\n  vs {} (prior period):", prev_m.period_key);
+                    print_throughput_delta(&m.throughput, &prev_m.throughput);
+                    print_lead_time_delta(&m.lead_time, &prev_m.lead_time);
+                    print_collaboration_delta(&m.collaboration, &prev_m.collaboration);
+                }
             }
         }
         MetricsTarget::User {
             user_gid,
             period,
             json,
+            compare,
         } => {
             let user_gid = resolve_user(db, &user_gid).await?;
             let p = asanadw::Period::parse(&period)?;
@@ -1085,12 +1182,22 @@ async fn handle_metrics(db: &asanadw::Database, target: MetricsTarget) -> anyhow
                 print_throughput(&m.throughput);
                 print_lead_time(&m.lead_time);
                 print_collaboration(&m.collaboration);
+                if compare {
+                    let prev = p.previous();
+                    let prev_m =
+                        asanadw::metrics::compute_user_metrics(db, &user_gid, &prev).await?;
+                    println!("\n  vs {} (prior period):", prev_m.period_key);
+                    print_throughput_delta(&m.throughput, &prev_m.throughput);
+                    print_lead_time_delta(&m.lead_time, &prev_m.lead_time);
+                    print_collaboration_delta(&m.collaboration, &prev_m.collaboration);
+                }
             }
         }
         MetricsTarget::Project {
             project_gid,
             period,
             json,
+            compare,
         } => {
             let p = asanadw::Period::parse(&period)?;
             let m = asanadw::metrics::compute_project_metrics(db, &project_gid, &p).await?;
@@ -1106,12 +1213,23 @@ async fn handle_metrics(db: &asanadw::Database, target: MetricsTarget) -> anyhow
                 print_health(&m.health);
                 print_lead_time(&m.lead_time);
                 print_collaboration(&m.collaboration);
+                if compare {
+                    let prev = p.previous();
+                    let prev_m =
+                        asanadw::metrics::compute_project_metrics(db, &project_gid, &prev).await?;
+                    println!("\n  vs {} (prior period):", prev_m.period_key);
+                    print_throughput_delta(&m.throughput, &prev_m.throughput);
+                    print_health(&prev_m.health);
+                    print_lead_time_delta(&m.lead_time, &prev_m.lead_time);
+                    print_collaboration_delta(&m.collaboration, &prev_m.collaboration);
+                }
             }
         }
         MetricsTarget::Portfolio {
             portfolio_gid,
             period,
             json,
+            compare,
         } => {
             let p = asanadw::Period::parse(&period)?;
             let m = asanadw::metrics::compute_portfolio_metrics(db, &portfolio_gid, &p).await?;
@@ -1128,12 +1246,25 @@ async fn handle_metrics(db: &asanadw::Database, target: MetricsTarget) -> anyhow
                 print_health(&m.health);
                 print_lead_time(&m.lead_time);
                 print_collaboration(&m.collaboration);
+                if compare {
+                    let prev = p.previous();
+                    let prev_m =
+                        asanadw::metrics::compute_portfolio_metrics(db, &portfolio_gid, &prev)
+                            .await?;
+                    println!("\n  vs {} (prior period):", prev_m.period_key);
+                    println!("  Projects: {}", prev_m.project_count);
+                    print_throughput_delta(&m.throughput, &prev_m.throughput);
+                    print_health(&prev_m.health);
+                    print_lead_time_delta(&m.lead_time, &prev_m.lead_time);
+                    print_collaboration_delta(&m.collaboration, &prev_m.collaboration);
+                }
             }
         }
         MetricsTarget::Team {
             team_gid,
             period,
             json,
+            compare,
         } => {
             let p = asanadw::Period::parse(&period)?;
             let m = asanadw::metrics::compute_team_metrics(db, &team_gid, &p).await?;
@@ -1150,6 +1281,17 @@ async fn handle_metrics(db: &asanadw::Database, target: MetricsTarget) -> anyhow
                 print_health(&m.health);
                 print_lead_time(&m.lead_time);
                 print_collaboration(&m.collaboration);
+                if compare {
+                    let prev = p.previous();
+                    let prev_m =
+                        asanadw::metrics::compute_team_metrics(db, &team_gid, &prev).await?;
+                    println!("\n  vs {} (prior period):", prev_m.period_key);
+                    println!("  Members: {}", prev_m.member_count);
+                    print_throughput_delta(&m.throughput, &prev_m.throughput);
+                    print_health(&prev_m.health);
+                    print_lead_time_delta(&m.lead_time, &prev_m.lead_time);
+                    print_collaboration_delta(&m.collaboration, &prev_m.collaboration);
+                }
             }
         }
     }
@@ -1158,9 +1300,12 @@ async fn handle_metrics(db: &asanadw::Database, target: MetricsTarget) -> anyhow
 
 fn print_throughput(t: &asanadw::metrics::ThroughputMetrics) {
     println!("  Throughput:");
-    println!("    Created:   {}", t.tasks_created);
-    println!("    Completed: {}", t.tasks_completed);
-    println!("    Net new:   {}", t.net_new);
+    println!("    Created:         {}", t.tasks_created);
+    println!("    Completed:       {}", t.tasks_completed);
+    println!("    Net new:         {}", t.net_new);
+    if let Some(rate) = t.completion_rate {
+        println!("    Completion rate: {:.0}%", rate * 100.0);
+    }
 }
 
 fn print_health(h: &asanadw::metrics::HealthMetrics) {
@@ -1175,6 +1320,12 @@ fn print_health(h: &asanadw::metrics::HealthMetrics) {
         h.unassigned_count, h.unassigned_pct
     );
     println!("    Stale (14d): {}", h.stale_count);
+    if let Some(avg) = h.avg_open_age_days {
+        println!("    Avg age:     {avg:.0} days");
+    }
+    if let Some(max) = h.max_open_age_days {
+        println!("    Oldest:      {max} days");
+    }
 }
 
 fn print_lead_time(lt: &asanadw::metrics::LeadTimeMetrics) {
@@ -1205,6 +1356,173 @@ fn print_collaboration(c: &asanadw::metrics::CollaborationMetrics) {
     println!("    Comments:    {}", c.total_comments);
     println!("    Commenters:  {}", c.unique_commenters);
     println!("    Likes:       {}", c.total_likes);
+}
+
+fn delta_str(current: u64, previous: u64) -> String {
+    let diff = current as i64 - previous as i64;
+    if diff > 0 {
+        format!(" (+{diff})")
+    } else if diff < 0 {
+        format!(" ({diff})")
+    } else {
+        String::new()
+    }
+}
+
+fn delta_pct(current: u64, previous: u64) -> String {
+    if previous == 0 {
+        return String::new();
+    }
+    let pct = (current as f64 - previous as f64) / previous as f64 * 100.0;
+    if pct.abs() < 0.5 {
+        String::new()
+    } else {
+        format!(" ({pct:+.0}%)")
+    }
+}
+
+fn print_throughput_delta(
+    curr: &asanadw::metrics::ThroughputMetrics,
+    prev: &asanadw::metrics::ThroughputMetrics,
+) {
+    println!("  Throughput (vs prior period):");
+    println!(
+        "    Created:         {}{}",
+        curr.tasks_created,
+        delta_pct(curr.tasks_created, prev.tasks_created)
+    );
+    println!(
+        "    Completed:       {}{}",
+        curr.tasks_completed,
+        delta_pct(curr.tasks_completed, prev.tasks_completed)
+    );
+    println!(
+        "    Net new:         {}{}",
+        curr.net_new,
+        delta_str(curr.net_new as u64, prev.net_new as u64)
+    );
+    if let Some(rate) = curr.completion_rate {
+        println!("    Completion rate: {:.0}%", rate * 100.0);
+    }
+}
+
+fn print_lead_time_delta(
+    curr: &asanadw::metrics::LeadTimeMetrics,
+    prev: &asanadw::metrics::LeadTimeMetrics,
+) {
+    println!("  Lead Time (vs prior period):");
+    match (curr.avg_days_to_complete, prev.avg_days_to_complete) {
+        (Some(c), Some(p)) => {
+            let diff = c - p;
+            let sign = if diff > 0.0 { "+" } else { "" };
+            println!("    Average: {c:.1} days ({sign}{diff:.1})");
+            println!(
+                "    Median:  {:.1} days",
+                curr.median_days_to_complete.unwrap_or(0.0)
+            );
+        }
+        (Some(c), None) => {
+            println!("    Average: {c:.1} days (no prior data)");
+        }
+        _ => println!("    No completed tasks in period"),
+    }
+}
+
+fn print_collaboration_delta(
+    curr: &asanadw::metrics::CollaborationMetrics,
+    prev: &asanadw::metrics::CollaborationMetrics,
+) {
+    println!("  Collaboration (vs prior period):");
+    println!(
+        "    Comments:    {}{}",
+        curr.total_comments,
+        delta_pct(curr.total_comments, prev.total_comments)
+    );
+    println!(
+        "    Commenters:  {}{}",
+        curr.unique_commenters,
+        delta_pct(curr.unique_commenters, prev.unique_commenters)
+    );
+    println!(
+        "    Likes:       {}{}",
+        curr.total_likes,
+        delta_pct(curr.total_likes, prev.total_likes)
+    );
+}
+
+async fn handle_status_updates(
+    db: &asanadw::Database,
+    gid: &str,
+    limit: u32,
+    json: bool,
+) -> anyhow::Result<()> {
+    let gid = gid.to_string();
+    let rows = db
+        .reader()
+        .call(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT status_gid, parent_gid, parent_type, author_gid, title, text,
+                        status_type, created_at
+                 FROM fact_status_updates
+                 WHERE parent_gid = ?1
+                 ORDER BY created_at DESC
+                 LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![gid, limit], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            })?;
+            let result: Vec<_> = rows.filter_map(|r| r.ok()).collect();
+            Ok::<_, rusqlite::Error>(result)
+        })
+        .await?;
+
+    if json {
+        let items: Vec<serde_json::Value> = rows
+            .iter()
+            .map(
+                |(gid, parent, ptype, author, title, text, stype, created)| {
+                    serde_json::json!({
+                        "status_gid": gid,
+                        "parent_gid": parent,
+                        "parent_type": ptype,
+                        "author_gid": author,
+                        "title": title,
+                        "text": text,
+                        "status_type": stype,
+                        "created_at": created,
+                    })
+                },
+            )
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&items)?);
+    } else if rows.is_empty() {
+        println!("No status updates found.");
+    } else {
+        for (_, _, _, _, title, text, stype, created) in &rows {
+            let preview = text
+                .as_deref()
+                .unwrap_or("")
+                .chars()
+                .take(80)
+                .collect::<String>();
+            println!("[{stype}] {title} ({created})");
+            if !preview.is_empty() {
+                println!("  {preview}");
+            }
+        }
+        println!("\n{} status updates", rows.len());
+    }
+
+    Ok(())
 }
 
 fn print_sync_report(report: &asanadw::SyncReport) {
