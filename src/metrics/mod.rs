@@ -128,6 +128,7 @@ pub async fn compute_portfolio_metrics(
                 throughput.tasks_created += t.tasks_created;
                 throughput.tasks_completed += t.tasks_completed;
                 throughput.net_new += t.net_new;
+                // completion_rate will be computed after the loop
 
                 let h = compute_health_sql(conn, Some(pgid), &end_str)?;
                 health.overdue_count += h.overdue_count;
@@ -144,10 +145,31 @@ pub async fn compute_portfolio_metrics(
                 // unique_commenters recalculated below
             }
 
+            throughput.completion_rate = if throughput.tasks_created > 0 {
+                Some(throughput.tasks_completed as f64 / throughput.tasks_created as f64)
+            } else {
+                None
+            };
+
             if health.total_open > 0 {
                 health.overdue_pct = health.overdue_count as f64 / health.total_open as f64 * 100.0;
                 health.unassigned_pct =
                     health.unassigned_count as f64 / health.total_open as f64 * 100.0;
+                // Aggregate aging across portfolio's projects
+                let mut ages: Vec<f64> = Vec::new();
+                for pgid in &project_gids {
+                    let h = compute_health_sql(conn, Some(pgid), &end_str)?;
+                    if let Some(avg) = h.avg_open_age_days {
+                        ages.push(avg);
+                    }
+                    if let Some(max) = h.max_open_age_days {
+                        health.max_open_age_days =
+                            Some(health.max_open_age_days.map_or(max, |cur| cur.max(max)));
+                    }
+                }
+                if !ages.is_empty() {
+                    health.avg_open_age_days = Some(ages.iter().sum::<f64>() / ages.len() as f64);
+                }
             }
 
             // Aggregate unique commenters across portfolio
@@ -217,83 +239,109 @@ pub async fn compute_team_metrics(
                 )
                 .ok();
 
-            // Get member GIDs
-            let mut stmt =
-                conn.prepare("SELECT user_gid FROM bridge_team_members WHERE team_gid = ?1")?;
-            let member_gids: Vec<String> = stmt
-                .query_map([&team_gid], |row| row.get(0))?
-                .filter_map(|r| r.ok())
-                .collect();
-            let member_count = member_gids.len() as u64;
+            // Get member count
+            let member_count: u64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM bridge_team_members WHERE team_gid = ?1",
+                    [&team_gid],
+                    |row| row.get::<_, i64>(0),
+                )? as u64;
 
+            // Get project GIDs for this team
+            let team_project_gids: Vec<String> = {
+                let mut stmt = conn.prepare(
+                    "SELECT project_gid FROM dim_projects WHERE team_gid = ?1"
+                )?;
+                let rows = stmt.query_map([&team_gid], |row| row.get(0))?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                rows
+            };
+
+            // Aggregate throughput, lead time, and collaboration across team's projects
             let mut throughput = ThroughputMetrics::default();
-            let mut health = HealthMetrics::default();
             let mut lead_time_days: Vec<i32> = Vec::new();
             let mut collaboration = CollaborationMetrics::default();
 
-            for uid in &member_gids {
-                let t = compute_throughput_sql(conn, Some(uid), None, &start_str, &end_str)?;
+            for pgid in &team_project_gids {
+                let t = compute_throughput_sql(conn, None, Some(pgid), &start_str, &end_str)?;
                 throughput.tasks_created += t.tasks_created;
                 throughput.tasks_completed += t.tasks_completed;
                 throughput.net_new += t.net_new;
 
-                let lt = compute_lead_time_raw(conn, Some(uid), None, &start_str, &end_str)?;
+                let lt = compute_lead_time_raw(conn, None, Some(pgid), &start_str, &end_str)?;
                 lead_time_days.extend(lt);
 
-                let c = compute_collaboration_sql(conn, Some(uid), None, &start_str, &end_str)?;
+                let c = compute_collaboration_sql(conn, None, Some(pgid), &start_str, &end_str)?;
                 collaboration.total_comments += c.total_comments;
                 collaboration.total_likes += c.total_likes;
             }
 
-            // Health across team's tasks (all open assigned to team members)
-            if !member_gids.is_empty() {
-                let placeholders = member_gids
-                    .iter()
-                    .map(|_| "?")
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let sql = format!(
-                    "SELECT
-                        SUM(CASE WHEN is_overdue = 1 THEN 1 ELSE 0 END),
-                        SUM(CASE WHEN assignee_gid IS NULL THEN 1 ELSE 0 END),
-                        SUM(CASE WHEN modified_at < date('now', '-14 days') THEN 1 ELSE 0 END),
-                        COUNT(*)
-                     FROM fact_tasks
-                     WHERE is_completed = 0
-                       AND assignee_gid IN ({placeholders})"
-                );
-                let mut stmt = conn.prepare(&sql)?;
-                for (i, uid) in member_gids.iter().enumerate() {
-                    stmt.raw_bind_parameter(i + 1, uid)?;
-                }
-                let mut rows = stmt.raw_query();
-                if let Some(row) = rows.next()? {
-                    health.overdue_count = row.get::<_, Option<i64>>(0)?.unwrap_or(0) as u64;
-                    health.unassigned_count = row.get::<_, Option<i64>>(1)?.unwrap_or(0) as u64;
-                    health.stale_count = row.get::<_, Option<i64>>(2)?.unwrap_or(0) as u64;
-                    health.total_open = row.get::<_, i64>(3)? as u64;
-                }
-                if health.total_open > 0 {
-                    health.overdue_pct =
-                        health.overdue_count as f64 / health.total_open as f64 * 100.0;
-                    health.unassigned_pct =
-                        health.unassigned_count as f64 / health.total_open as f64 * 100.0;
-                }
+            throughput.completion_rate = if throughput.tasks_created > 0 {
+                Some(throughput.tasks_completed as f64 / throughput.tasks_created as f64)
+            } else {
+                None
+            };
 
-                // Unique commenters across team
-                let sql = format!(
+            // Health across team's tasks (all open tasks in team's projects)
+            let health;
+            {
+                let sql =
+                    "SELECT
+                        SUM(CASE WHEN t.due_on < date('now') AND t.due_on IS NOT NULL THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN t.assignee_gid IS NULL THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN t.modified_at < date('now', '-14 days') THEN 1 ELSE 0 END),
+                        COUNT(*),
+                        AVG(julianday('now') - julianday(t.created_at)),
+                        MAX(CAST(julianday('now') - julianday(t.created_at) AS INTEGER))
+                     FROM fact_tasks t
+                     JOIN bridge_task_projects btp ON btp.task_gid = t.task_gid
+                     JOIN dim_projects p ON p.project_gid = btp.project_gid
+                     WHERE t.is_completed = 0
+                       AND t.is_subtask = 0
+                       AND p.team_gid = ?1";
+                let mut stmt = conn.prepare(sql)?;
+                stmt.raw_bind_parameter(1, &team_gid)?;
+                let mut rows = stmt.raw_query();
+                let row = rows.next()?.unwrap();
+                let overdue_count = row.get::<_, Option<i64>>(0)?.unwrap_or(0) as u64;
+                let unassigned_count = row.get::<_, Option<i64>>(1)?.unwrap_or(0) as u64;
+                let stale_count = row.get::<_, Option<i64>>(2)?.unwrap_or(0) as u64;
+                let total_open = row.get::<_, i64>(3)? as u64;
+                let avg_open_age_days: Option<f64> = row.get(4)?;
+                let max_open_age_days: Option<i32> = row.get(5)?;
+
+                health = HealthMetrics {
+                    overdue_count,
+                    unassigned_count,
+                    stale_count,
+                    total_open,
+                    overdue_pct: if total_open > 0 {
+                        overdue_count as f64 / total_open as f64 * 100.0
+                    } else {
+                        0.0
+                    },
+                    unassigned_pct: if total_open > 0 {
+                        unassigned_count as f64 / total_open as f64 * 100.0
+                    } else {
+                        0.0
+                    },
+                    avg_open_age_days,
+                    max_open_age_days,
+                };
+
+                // Unique commenters across team's projects
+                let sql =
                     "SELECT COUNT(DISTINCT c.author_gid)
                      FROM fact_comments c
-                     JOIN fact_tasks t ON t.task_gid = c.task_gid
-                     WHERE t.assignee_gid IN ({placeholders})
-                       AND c.created_date_key >= ? AND c.created_date_key <= ?"
-                );
-                let mut stmt = conn.prepare(&sql)?;
-                for (i, uid) in member_gids.iter().enumerate() {
-                    stmt.raw_bind_parameter(i + 1, uid)?;
-                }
-                stmt.raw_bind_parameter(member_gids.len() + 1, &start_str)?;
-                stmt.raw_bind_parameter(member_gids.len() + 2, &end_str)?;
+                     JOIN bridge_task_projects btp ON btp.task_gid = c.task_gid
+                     JOIN dim_projects p ON p.project_gid = btp.project_gid
+                     WHERE p.team_gid = ?1
+                       AND c.created_date_key >= ?2 AND c.created_date_key <= ?3";
+                let mut stmt = conn.prepare(sql)?;
+                stmt.raw_bind_parameter(1, &team_gid)?;
+                stmt.raw_bind_parameter(2, &start_str)?;
+                stmt.raw_bind_parameter(3, &end_str)?;
                 let mut rows = stmt.raw_query();
                 if let Some(row) = rows.next()? {
                     collaboration.unique_commenters = row.get::<_, i64>(0)? as u64;
@@ -335,7 +383,7 @@ fn compute_throughput_sql(
 
     // Tasks created in period
     let sql = format!(
-        "SELECT COUNT(*) FROM fact_tasks t {join_clause} WHERE t.created_date_key >= ?1 AND t.created_date_key <= ?2 {where_clause}"
+        "SELECT COUNT(*) FROM fact_tasks t {join_clause} WHERE t.created_date_key >= ?1 AND t.created_date_key <= ?2 AND t.is_subtask = 0 {where_clause}"
     );
     let mut stmt = conn.prepare(&sql)?;
     stmt.raw_bind_parameter(1, start)?;
@@ -345,7 +393,7 @@ fn compute_throughput_sql(
 
     // Tasks completed in period
     let sql = format!(
-        "SELECT COUNT(*) FROM fact_tasks t {join_clause} WHERE t.completed_date_key >= ?1 AND t.completed_date_key <= ?2 AND t.is_completed = 1 {where_clause}"
+        "SELECT COUNT(*) FROM fact_tasks t {join_clause} WHERE t.completed_date_key >= ?1 AND t.completed_date_key <= ?2 AND t.is_completed = 1 AND t.is_subtask = 0 {where_clause}"
     );
     let mut stmt = conn.prepare(&sql)?;
     stmt.raw_bind_parameter(1, start)?;
@@ -353,10 +401,17 @@ fn compute_throughput_sql(
     bind_fn(&mut stmt, 3)?;
     let completed: i64 = stmt.raw_query().next()?.unwrap().get(0)?;
 
+    let completion_rate = if created > 0 {
+        Some(completed as f64 / created as f64)
+    } else {
+        None
+    };
+
     Ok(ThroughputMetrics {
         tasks_created: created as u64,
         tasks_completed: completed as u64,
         net_new: created - completed,
+        completion_rate,
     })
 }
 
@@ -379,10 +434,12 @@ fn compute_health_sql(
             SUM(CASE WHEN t.due_on < date('now') AND t.due_on IS NOT NULL THEN 1 ELSE 0 END),
             SUM(CASE WHEN t.assignee_gid IS NULL THEN 1 ELSE 0 END),
             SUM(CASE WHEN t.modified_at < date('now', '-14 days') THEN 1 ELSE 0 END),
-            COUNT(*)
+            COUNT(*),
+            AVG(julianday('now') - julianday(t.created_at)),
+            MAX(CAST(julianday('now') - julianday(t.created_at) AS INTEGER))
          FROM fact_tasks t
          {join}
-         WHERE t.is_completed = 0{where_extra}"
+         WHERE t.is_completed = 0 AND t.is_subtask = 0{where_extra}"
     );
     let mut stmt = conn.prepare(&sql)?;
     if let Some(pgid) = project_gid {
@@ -395,6 +452,8 @@ fn compute_health_sql(
     let unassigned = row.get::<_, Option<i64>>(1)?.unwrap_or(0) as u64;
     let stale = row.get::<_, Option<i64>>(2)?.unwrap_or(0) as u64;
     let total_open = row.get::<_, i64>(3)? as u64;
+    let avg_open_age: Option<f64> = row.get(4)?;
+    let max_open_age: Option<i32> = row.get(5)?;
 
     Ok(HealthMetrics {
         overdue_count: overdue,
@@ -411,6 +470,8 @@ fn compute_health_sql(
         } else {
             0.0
         },
+        avg_open_age_days: avg_open_age,
+        max_open_age_days: max_open_age,
     })
 }
 
@@ -431,7 +492,7 @@ fn compute_lead_time_raw(
     let sql = format!(
         "SELECT t.days_to_complete FROM fact_tasks t {join_clause}
          WHERE t.is_completed = 1 AND t.days_to_complete IS NOT NULL
-           AND t.completed_date_key >= ?1 AND t.completed_date_key <= ?2 {where_clause}
+           AND t.completed_date_key >= ?1 AND t.completed_date_key <= ?2 AND t.is_subtask = 0 {where_clause}
          ORDER BY t.days_to_complete"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -466,6 +527,7 @@ fn compute_collaboration_sql(
     end: &str,
 ) -> std::result::Result<CollaborationMetrics, rusqlite::Error> {
     // Comments — use parameterized query for entity filter
+    // For users, count comments written BY the user (author_gid), not comments on their tasks
     let (task_join, task_where, entity_val): (&str, &str, Option<&str>) =
         if let Some(pgid) = project_gid {
             (
@@ -474,11 +536,7 @@ fn compute_collaboration_sql(
                 Some(pgid),
             )
         } else if let Some(uid) = user_gid {
-            (
-                "JOIN fact_tasks t ON t.task_gid = c.task_gid",
-                " AND t.assignee_gid = ?3",
-                Some(uid),
-            )
+            ("", " AND c.author_gid = ?3", Some(uid))
         } else {
             ("", "", None)
         };
@@ -517,9 +575,13 @@ fn compute_collaboration_sql(
             ("", "", None)
         };
 
+    // Count likes on tasks active during the period (created before end AND
+    // either still open or completed during/after the period start).
+    // num_likes is a point-in-time snapshot, not period-scoped.
     let sql = format!(
         "SELECT COALESCE(SUM(t.num_likes), 0) FROM fact_tasks t {like_join}
-         WHERE t.created_date_key >= ?1 AND t.created_date_key <= ?2{like_where}"
+         WHERE t.created_date_key <= ?2
+           AND (t.is_completed = 0 OR t.completed_date_key >= ?1){like_where}"
     );
     let mut stmt = conn.prepare(&sql)?;
     stmt.raw_bind_parameter(1, start)?;
@@ -737,6 +799,196 @@ mod tests {
 
         // Lead time - 1 completed task with 9 days
         assert_eq!(metrics.lead_time.avg_days_to_complete, Some(9.0));
+    }
+
+    #[tokio::test]
+    async fn test_team_health_includes_unassigned_tasks() {
+        let db = Database::open_memory().await.unwrap();
+
+        db.writer()
+            .call(|conn| {
+                // Create a team and project belonging to it
+                conn.execute(
+                    "INSERT INTO dim_teams (team_gid, name, workspace_gid, cached_at)
+                     VALUES ('team1', 'Team Alpha', 'w1', datetime('now'))",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO dim_projects (project_gid, name, team_gid, workspace_gid, cached_at)
+                     VALUES ('p1', 'Project 1', 'team1', 'w1', datetime('now'))",
+                    [],
+                )?;
+                // A member of the team
+                conn.execute(
+                    "INSERT INTO dim_users (user_gid, name, cached_at) VALUES ('u1', 'Alice', datetime('now'))",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO bridge_team_members (team_gid, user_gid) VALUES ('team1', 'u1')",
+                    [],
+                )?;
+
+                // An UNASSIGNED open task in the team's project
+                conn.execute(
+                    "INSERT INTO fact_tasks (task_gid, name, is_completed, created_at, created_date_key, modified_at, is_subtask, is_overdue, cached_at)
+                     VALUES ('t1', 'Unassigned Task', 0, '2025-01-05', '2025-01-05', '2025-01-05', 0, 0, datetime('now'))",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO bridge_task_projects (task_gid, project_gid) VALUES ('t1', 'p1')",
+                    [],
+                )?;
+
+                // An assigned open task in the team's project
+                conn.execute(
+                    "INSERT INTO fact_tasks (task_gid, name, assignee_gid, is_completed, created_at, created_date_key, modified_at, is_subtask, is_overdue, cached_at)
+                     VALUES ('t2', 'Assigned Task', 'u1', 0, '2025-01-05', '2025-01-05', '2025-01-05', 0, 0, datetime('now'))",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO bridge_task_projects (task_gid, project_gid) VALUES ('t2', 'p1')",
+                    [],
+                )?;
+
+                Ok::<(), rusqlite::Error>(())
+            })
+            .await
+            .unwrap();
+
+        let period = Period::Month(2025, 1);
+        let metrics = compute_team_metrics(&db, "team1", &period).await.unwrap();
+
+        // Both tasks should be counted — including the unassigned one
+        assert_eq!(metrics.health.total_open, 2);
+        assert_eq!(metrics.health.unassigned_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_subtasks_excluded_from_metrics() {
+        let db = Database::open_memory().await.unwrap();
+
+        db.writer()
+            .call(|conn| {
+                conn.execute(
+                    "INSERT INTO dim_projects (project_gid, name, workspace_gid, cached_at)
+                     VALUES ('p1', 'Project 1', 'w1', datetime('now'))",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO dim_users (user_gid, name, cached_at)
+                     VALUES ('u1', 'Alice', datetime('now'))",
+                    [],
+                )?;
+
+                // A top-level completed task
+                conn.execute(
+                    "INSERT INTO fact_tasks (task_gid, name, assignee_gid, is_completed, completed_at, completed_date_key, created_at, created_date_key, modified_at, is_subtask, days_to_complete, is_overdue, cached_at)
+                     VALUES ('t1', 'Top Task', 'u1', 1, '2025-01-10', '2025-01-10', '2025-01-01', '2025-01-01', '2025-01-10', 0, 9, 0, datetime('now'))",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO bridge_task_projects (task_gid, project_gid) VALUES ('t1', 'p1')",
+                    [],
+                )?;
+
+                // A subtask (completed) — should be excluded from throughput/lead_time
+                conn.execute(
+                    "INSERT INTO fact_tasks (task_gid, name, assignee_gid, is_completed, completed_at, completed_date_key, created_at, created_date_key, modified_at, is_subtask, days_to_complete, is_overdue, cached_at)
+                     VALUES ('t1-sub', 'Subtask', 'u1', 1, '2025-01-10', '2025-01-10', '2025-01-01', '2025-01-01', '2025-01-10', 1, 2, 0, datetime('now'))",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO bridge_task_projects (task_gid, project_gid) VALUES ('t1-sub', 'p1')",
+                    [],
+                )?;
+
+                // A subtask (open) — should be excluded from health
+                conn.execute(
+                    "INSERT INTO fact_tasks (task_gid, name, is_completed, created_at, created_date_key, modified_at, is_subtask, is_overdue, cached_at)
+                     VALUES ('t2-sub', 'Open Subtask', 0, '2025-01-05', '2025-01-05', '2025-01-05', 1, 0, datetime('now'))",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO bridge_task_projects (task_gid, project_gid) VALUES ('t2-sub', 'p1')",
+                    [],
+                )?;
+
+                Ok::<(), rusqlite::Error>(())
+            })
+            .await
+            .unwrap();
+
+        let period = Period::Month(2025, 1);
+        let metrics = compute_project_metrics(&db, "p1", &period).await.unwrap();
+
+        // Throughput should only count the top-level task
+        assert_eq!(
+            metrics.throughput.tasks_created, 1,
+            "subtasks should be excluded from tasks_created"
+        );
+        assert_eq!(
+            metrics.throughput.tasks_completed, 1,
+            "subtasks should be excluded from tasks_completed"
+        );
+
+        // Health should only count top-level open tasks (none here — subtask is open but excluded)
+        assert_eq!(
+            metrics.health.total_open, 0,
+            "subtasks should be excluded from health total_open"
+        );
+
+        // Lead time should only include top-level task (9 days, not subtask's 2 days)
+        assert_eq!(metrics.lead_time.avg_days_to_complete, Some(9.0));
+    }
+
+    #[tokio::test]
+    async fn test_completion_rate() {
+        let db = Database::open_memory().await.unwrap();
+
+        db.writer()
+            .call(|conn| {
+                conn.execute(
+                    "INSERT INTO dim_projects (project_gid, name, workspace_gid, cached_at)
+                     VALUES ('p1', 'Test Project', 'w1', datetime('now'))",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO dim_users (user_gid, name, cached_at)
+                     VALUES ('u1', 'Test User', datetime('now'))",
+                    [],
+                )?;
+
+                // 2 tasks created, 1 completed => completion_rate = 0.5
+                conn.execute(
+                    "INSERT INTO fact_tasks (task_gid, name, assignee_gid, is_completed, completed_at, completed_date_key, created_at, created_date_key, modified_at, is_subtask, days_to_complete, is_overdue, cached_at)
+                     VALUES ('t1', 'Done Task', 'u1', 1, '2025-01-10', '2025-01-10', '2025-01-01', '2025-01-01', '2025-01-10', 0, 9, 0, datetime('now'))",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO bridge_task_projects (task_gid, project_gid) VALUES ('t1', 'p1')",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO fact_tasks (task_gid, name, assignee_gid, is_completed, created_at, created_date_key, modified_at, is_subtask, is_overdue, cached_at)
+                     VALUES ('t2', 'Open Task', 'u1', 0, '2025-01-05', '2025-01-05', '2025-01-05', 0, 0, datetime('now'))",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO bridge_task_projects (task_gid, project_gid) VALUES ('t2', 'p1')",
+                    [],
+                )?;
+
+                Ok::<(), rusqlite::Error>(())
+            })
+            .await
+            .unwrap();
+
+        let period = Period::Month(2025, 1);
+        let metrics = compute_project_metrics(&db, "p1", &period).await.unwrap();
+
+        assert_eq!(metrics.throughput.tasks_created, 2);
+        assert_eq!(metrics.throughput.tasks_completed, 1);
+        assert_eq!(metrics.throughput.completion_rate, Some(0.5));
     }
 
     #[tokio::test]

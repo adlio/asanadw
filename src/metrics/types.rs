@@ -6,9 +6,10 @@ pub struct ThroughputMetrics {
     pub tasks_created: u64,
     pub tasks_completed: u64,
     pub net_new: i64,
+    pub completion_rate: Option<f64>,
 }
 
-/// Health metrics: overdue tasks, unassigned tasks, stale tasks.
+/// Health metrics: overdue tasks, unassigned tasks, stale tasks, aging.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct HealthMetrics {
     pub overdue_count: u64,
@@ -20,6 +21,10 @@ pub struct HealthMetrics {
     pub overdue_pct: f64,
     /// Percentage of open tasks that are unassigned.
     pub unassigned_pct: f64,
+    /// Average age (in days) of open tasks.
+    pub avg_open_age_days: Option<f64>,
+    /// Age (in days) of the oldest open task.
+    pub max_open_age_days: Option<i32>,
 }
 
 /// Lead time metrics: how long tasks take to complete.
@@ -37,6 +42,8 @@ pub struct LeadTimeMetrics {
 pub struct CollaborationMetrics {
     pub total_comments: u64,
     pub unique_commenters: u64,
+    /// Sum of likes on tasks active during the period. Note: this is a
+    /// point-in-time snapshot from Asana, not likes added during the period.
     pub total_likes: u64,
 }
 
