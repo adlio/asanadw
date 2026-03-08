@@ -112,11 +112,6 @@ fn insert_date_range(
 
 /// Populate dim_period based on dates in dim_date.
 pub fn ensure_dim_period(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
-    let existing: i64 = conn.query_row("SELECT COUNT(*) FROM dim_period", [], |row| row.get(0))?;
-    if existing > 0 {
-        return Ok(());
-    }
-
     // Get the year range from dim_date
     let (min_year, max_year): (i32, i32) =
         conn.query_row("SELECT MIN(year), MAX(year) FROM dim_date", [], |row| {
