@@ -106,8 +106,9 @@ async fn sync_project_incremental(
         Err(e) => return Err(e.into()),
     };
 
-    // Extract the set of task GIDs that changed
+    // Extract the set of task GIDs that changed or were deleted
     let mut changed_task_gids: HashSet<String> = HashSet::new();
+    let mut deleted_task_gids: HashSet<String> = HashSet::new();
     for event in &events_response.data {
         let resource_type = event
             .resource
@@ -122,13 +123,20 @@ async fn sync_project_incremental(
             "changed" | "added" | "undeleted" => {
                 changed_task_gids.insert(event.resource.gid.clone());
             }
-            // deleted/removed: defer to next full sync for cleanup
+            "deleted" | "removed" => {
+                deleted_task_gids.insert(event.resource.gid.clone());
+            }
             _ => {}
         }
     }
 
-    // If no tasks changed, just update the token and return
-    if changed_task_gids.is_empty() {
+    // Don't count a task as both changed and deleted
+    for gid in &deleted_task_gids {
+        changed_task_gids.remove(gid);
+    }
+
+    // If no tasks changed or were deleted, just update the token and return
+    if changed_task_gids.is_empty() && deleted_task_gids.is_empty() {
         let new_token = events_response.sync.clone();
         db.writer()
             .call({
@@ -170,7 +178,10 @@ async fn sync_project_incremental(
         return Ok(None);
     }
 
-    progress.on_incremental_sync(&entity_key, changed_task_gids.len());
+    progress.on_incremental_sync(
+        &entity_key,
+        changed_task_gids.len() + deleted_task_gids.len(),
+    );
 
     // Fetch full task data for each changed task
     let mut tasks: Vec<asanaclient::Task> = Vec::new();
@@ -218,7 +229,16 @@ async fn sync_project_incremental(
         .call({
             let tasks = tasks.clone();
             let entity_key = entity_key.clone();
+            let deleted_task_gids = deleted_task_gids.clone();
             move |conn| {
+                // Delete tasks that were removed/deleted
+                for gid in &deleted_task_gids {
+                    conn.execute(
+                        "DELETE FROM fact_tasks WHERE task_gid = ?1",
+                        rusqlite::params![gid],
+                    )?;
+                }
+
                 // Upsert referenced users BEFORE tasks (FK constraints)
                 for task in &tasks {
                     if let Some(ref assignee) = task.assignee {
@@ -319,11 +339,22 @@ async fn sync_project_full(
     // Fetch sections
     let sections = super::api_helpers::get_project_sections(client, project_gid).await?;
 
+    // Fetch status updates for the project
+    let status_updates =
+        match super::api_helpers::get_project_status_updates(client, project_gid).await {
+            Ok(updates) => updates,
+            Err(e) => {
+                log::warn!("Failed to fetch status updates for project {project_gid}: {e}");
+                Vec::new()
+            }
+        };
+
     db.writer()
         .call({
             let project = project.clone();
             let project_gid = project_gid.to_string();
             let sections = sections.clone();
+            let status_updates = status_updates.clone();
             move |conn| {
                 // Insert referenced entities before the project (FK constraints)
                 if let Some(ref owner) = project.owner {
@@ -350,6 +381,14 @@ async fn sync_project_full(
                         i as i32,
                     )?;
                 }
+
+                for status in &status_updates {
+                    if let Some(ref author) = status.created_by {
+                        repository::upsert_user_minimal(conn, &author.gid, author.name.as_deref())?;
+                    }
+                    repository::upsert_status_update(conn, &project_gid, "project", status)?;
+                }
+
                 Ok::<(), rusqlite::Error>(())
             }
         })
@@ -418,6 +457,20 @@ async fn sync_project_full(
 
     let total_synced = tasks.len() as u64;
 
+    // Fetch dependencies for tasks that need comments (modified since last sync)
+    let mut task_dependencies: Vec<(String, Vec<asanaclient::types::TaskDependency>)> = Vec::new();
+    for task in &tasks_needing_comments {
+        match super::api_helpers::get_task_dependencies(client, &task.gid).await {
+            Ok(deps) if !deps.is_empty() => {
+                task_dependencies.push((task.gid.clone(), deps));
+            }
+            Ok(_) => {}
+            Err(e) => {
+                log::debug!("Failed to fetch dependencies for task {}: {e}", task.gid);
+            }
+        }
+    }
+
     // Write all tasks and comments to DB
     db.writer()
         .call({
@@ -454,6 +507,15 @@ async fn sync_project_full(
                     repository::upsert_task(conn, task)?;
                 }
 
+                // Upsert dependencies (still with FK checks off since depends_on_gid
+                // may reference tasks not in this project)
+                for (task_gid, deps) in &task_dependencies {
+                    repository::delete_task_dependencies(conn, task_gid)?;
+                    for dep in deps {
+                        repository::upsert_task_dependency(conn, task_gid, &dep.gid)?;
+                    }
+                }
+
                 // Re-enable FK checks before inserting comments (which have valid FKs)
                 conn.execute_batch("PRAGMA foreign_keys = ON;")?;
 
@@ -485,6 +547,8 @@ async fn sync_project_full(
     db.writer()
         .call({
             let entity_key = entity_key.clone();
+            let range_start = since.format("%Y-%m-%d").to_string();
+            let range_end = today.format("%Y-%m-%d").to_string();
             move |conn| {
                 repository::update_sync_job(
                     conn,
@@ -497,6 +561,8 @@ async fn sync_project_full(
                     None,
                 )?;
                 repository::update_monitored_entity_sync_time(conn, &entity_key)?;
+                // Record synced range
+                repository::insert_synced_range(conn, &entity_key, &range_start, &range_end)?;
                 Ok::<(), rusqlite::Error>(())
             }
         })
@@ -565,24 +631,77 @@ pub async fn sync_user(
 
     let task_count = tasks.len() as u64;
 
-    for task in &tasks {
-        db.writer()
-            .call({
-                let task = task.clone();
-                move |conn| {
-                    repository::upsert_task(conn, &task)?;
-                    Ok::<(), rusqlite::Error>(())
-                }
-            })
-            .await?;
+    // Fetch comments for each task
+    let mut task_comments: Vec<(String, Vec<asanaclient::Story>)> = Vec::new();
+    let comments_total = tasks.len();
+    for (i, task) in tasks.iter().enumerate() {
+        progress.on_comments_progress(&entity_key, i + 1, comments_total);
+        let task_gid = task.gid.clone();
+        match retry_api!(client.tasks().comments(&task_gid)) {
+            Ok(comments) => {
+                task_comments.push((task.gid.clone(), comments));
+            }
+            Err(e) => {
+                log::warn!("Failed to fetch comments for task {}: {e}", task.gid);
+                task_comments.push((task.gid.clone(), Vec::new()));
+            }
+        }
     }
+
+    // Write all tasks and comments in a single batch
+    db.writer()
+        .call({
+            let tasks = tasks.clone();
+            move |conn| {
+                // Upsert referenced users first
+                for task in &tasks {
+                    if let Some(ref assignee) = task.assignee {
+                        repository::upsert_user_minimal_with_email(
+                            conn,
+                            &assignee.gid,
+                            assignee.name.as_deref(),
+                            assignee.email.as_deref(),
+                        )?;
+                    }
+                }
+                for (_task_gid, comments) in &task_comments {
+                    for comment in comments {
+                        if let Some(ref author) = comment.created_by {
+                            repository::upsert_user_minimal(
+                                conn,
+                                &author.gid,
+                                author.name.as_deref(),
+                            )?;
+                        }
+                    }
+                }
+
+                conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+                for task in &tasks {
+                    repository::upsert_task(conn, task)?;
+                }
+                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+
+                for (task_gid, comments) in &task_comments {
+                    for comment in comments {
+                        repository::upsert_comment(conn, task_gid, comment)?;
+                    }
+                }
+
+                Ok::<(), rusqlite::Error>(())
+            }
+        })
+        .await?;
 
     db.writer()
         .call({
             let entity_key = entity_key.clone();
+            let range_start = since.format("%Y-%m-%d").to_string();
+            let range_end = today.format("%Y-%m-%d").to_string();
             move |conn| {
                 repository::update_sync_job(conn, job_id, "completed", task_count, 0, 1, 1, None)?;
                 repository::update_monitored_entity_sync_time(conn, &entity_key)?;
+                repository::insert_synced_range(conn, &entity_key, &range_start, &range_end)?;
                 Ok::<(), rusqlite::Error>(())
             }
         })
@@ -672,15 +791,36 @@ pub async fn sync_portfolio(
     let entity_key = format!("portfolio:{portfolio_gid}");
 
     let portfolio = retry_api!(client.portfolios().get(portfolio_gid))?;
+
+    // Fetch portfolio status updates
+    let portfolio_status_updates =
+        match super::api_helpers::get_portfolio_status_updates(client, portfolio_gid).await {
+            Ok(updates) => updates,
+            Err(e) => {
+                log::warn!("Failed to fetch status updates for portfolio {portfolio_gid}: {e}");
+                Vec::new()
+            }
+        };
+
     db.writer()
         .call({
             let portfolio = portfolio.clone();
+            let portfolio_gid = portfolio_gid.to_string();
+            let status_updates = portfolio_status_updates.clone();
             move |conn| {
                 // Insert referenced owner before the portfolio (FK constraints)
                 if let Some(ref owner) = portfolio.owner {
                     repository::upsert_user_minimal(conn, &owner.gid, owner.name.as_deref())?;
                 }
                 repository::upsert_portfolio(conn, &portfolio)?;
+
+                for status in &status_updates {
+                    if let Some(ref author) = status.created_by {
+                        repository::upsert_user_minimal(conn, &author.gid, author.name.as_deref())?;
+                    }
+                    repository::upsert_status_update(conn, &portfolio_gid, "portfolio", status)?;
+                }
+
                 Ok::<(), rusqlite::Error>(())
             }
         })

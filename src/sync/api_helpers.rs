@@ -70,3 +70,42 @@ pub struct ProjectRef {
     #[serde(default)]
     pub archived: bool,
 }
+
+/// Get dependencies for a task (tasks that this task depends on).
+pub async fn get_task_dependencies(
+    client: &Client,
+    task_gid: &str,
+) -> Result<Vec<asanaclient::types::TaskDependency>> {
+    let path = format!("/tasks/{task_gid}/dependencies");
+    let query = [("opt_fields", "gid,name")];
+    let deps: Vec<asanaclient::types::TaskDependency> = client.get_all(&path, &query).await?;
+    Ok(deps)
+}
+
+/// Get status updates for a portfolio.
+pub async fn get_portfolio_status_updates(
+    client: &Client,
+    portfolio_gid: &str,
+) -> Result<Vec<asanaclient::types::StatusUpdate>> {
+    let path = format!("/portfolios/{portfolio_gid}/status_updates");
+    let query = [(
+        "opt_fields",
+        "gid,title,text,html_text,status_type,created_at,created_by,created_by.name",
+    )];
+    let updates: Vec<asanaclient::types::StatusUpdate> = client.get_all(&path, &query).await?;
+    Ok(updates)
+}
+
+/// Get status updates for a project.
+pub async fn get_project_status_updates(
+    client: &Client,
+    project_gid: &str,
+) -> Result<Vec<asanaclient::types::StatusUpdate>> {
+    let path = format!("/projects/{project_gid}/status_updates");
+    let query = [(
+        "opt_fields",
+        "gid,title,text,html_text,status_type,created_at,created_by,created_by.name",
+    )];
+    let updates: Vec<asanaclient::types::StatusUpdate> = client.get_all(&path, &query).await?;
+    Ok(updates)
+}
